@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find C:UsersSvetoslavAndroidStudioProjectsTaxiPro2 -name *.gradle.kts -o -name *.gradle)",
+      "Bash(xargs grep:*)",
+      "Bash(./gradlew compileDebugKotlin)",
+      "Bash(\"C:/Users/Svetoslav/AndroidStudioProjects/TaxiPro2/app/src/main/java/com/taxipro/ui/screens/ActiveRideScreen.kt\")",
+      "WebFetch(domain:apps.apple.com)",
+      "WebSearch"
+    ]
+  }
+}
