@@ -19,12 +19,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.taxipro.data.db.Shift
+import com.taxipro.data.db.formatPrice
+import com.taxipro.ui.theme.LocalSettings
+import com.taxipro.ui.theme.LocalStrings
 import com.taxipro.ui.viewmodel.RideViewModel
 import java.text.SimpleDateFormat
 import java.util.*
 
 @Composable
 fun ShiftHistoryScreen(rideVm: RideViewModel) {
+    val st        = LocalStrings.current
     val allShifts by rideVm.allShifts.collectAsState(initial = emptyList())
     var expandedId by remember { mutableStateOf<Long?>(null) }
 
@@ -35,15 +39,15 @@ fun ShiftHistoryScreen(rideVm: RideViewModel) {
             .padding(horizontal = 16.dp)
     ) {
         Spacer(Modifier.height(16.dp))
-        Text("История на смени", color = Color.White,
+        Text(st.shiftHistoryScreen, color = Color.White,
             fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(4.dp))
-        Text("${allShifts.size} смени записани", color = Muted, fontSize = 13.sp)
+        Text(st.shiftsRecorded.format(allShifts.size), color = Muted, fontSize = 13.sp)
         Spacer(Modifier.height(14.dp))
 
         if (allShifts.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("Все още няма завършени смени.", color = Muted, fontSize = 14.sp)
+                Text(st.noShifts, color = Muted, fontSize = 14.sp)
             }
         } else {
             Column(
@@ -73,7 +77,9 @@ private fun ShiftCard(
     isExpanded: Boolean,
     onToggle: () -> Unit,
 ) {
-    val rides by rideVm.getRidesByShift(shift.id).collectAsState(initial = emptyList())
+    val st       = LocalStrings.current
+    val settings = LocalSettings.current
+    val rides    by rideVm.getRidesByShift(shift.id).collectAsState(initial = emptyList())
 
     val sdfDate = SimpleDateFormat("dd.MM.yyyy", Locale.getDefault())
     val sdfTime = SimpleDateFormat("HH:mm", Locale.getDefault())
@@ -82,7 +88,10 @@ private fun ShiftCard(
     val durationMs  = endMs - shift.startTime
     val durationH   = durationMs / 3_600_000L
     val durationMin = (durationMs % 3_600_000L) / 60_000L
-    val durStr      = if (durationH > 0) "${durationH}ч ${durationMin}мин" else "${durationMin}мин"
+    val durStr      = if (durationH > 0)
+        "${durationH}${st.hoursAbbr} ${durationMin}${st.minAbbr}"
+    else
+        "${durationMin}${st.minAbbr}"
 
     val revenue = rides.sumOf { it.price }
     val tips    = rides.sumOf { it.tip }
@@ -102,7 +111,6 @@ private fun ShiftCard(
                     .padding(14.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Shift number badge
                 Box(
                     Modifier
                         .size(42.dp)
@@ -122,12 +130,13 @@ private fun ShiftCard(
                 }
                 Spacer(Modifier.width(12.dp))
 
-                // Info
                 Column(Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                         Text(
-                            "Смяна #${shift.shiftNumber}",
+                            st.shiftNum.format(shift.shiftNumber),
                             color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold
                         )
                         if (shift.isActive) {
@@ -136,7 +145,7 @@ private fun ShiftCard(
                                     .background(Green.copy(alpha = 0.2f), RoundedCornerShape(4.dp))
                                     .padding(horizontal = 6.dp, vertical = 2.dp)
                             ) {
-                                Text("АКТИВНА", color = Green, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                Text(st.activeLabel, color = Green, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -147,7 +156,7 @@ private fun ShiftCard(
                         color = Muted, fontSize = 11.sp
                     )
                     Text(
-                        "${rides.size} курса  •  $durStr  •  %.1f км".format(km),
+                        "${rides.size} ${st.ridesLabel}  •  $durStr  •  %.1f km".format(km),
                         color = Muted, fontSize = 11.sp
                     )
                 }
@@ -155,12 +164,12 @@ private fun ShiftCard(
 
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
-                        "%.2f лв".format(revenue),
+                        settings.formatPrice(revenue),
                         color = Gold, fontSize = 16.sp,
                         fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace
                     )
                     if (tips > 0)
-                        Text("+%.2f бакш.".format(tips), color = Purple, fontSize = 10.sp)
+                        Text("+%.2f ${st.tipBadgeShort}".format(tips), color = Purple, fontSize = 10.sp)
                     Icon(
                         if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
                         null, tint = Muted, modifier = Modifier.size(18.dp)
@@ -185,29 +194,30 @@ private fun ShiftCard(
 
 @Composable
 private fun ShiftDetailPanel(shift: Shift, rides: List<com.taxipro.data.db.Ride>) {
+    val st       = LocalStrings.current
+    val settings = LocalSettings.current
+
     val totalRevenue = rides.sumOf { it.price }
     val totalTips    = rides.sumOf { it.tip }
     val totalKm      = rides.sumOf { it.kilometers }
     val totalWait    = rides.sumOf { it.waitMinutes }
     val avgPerRide   = if (rides.isNotEmpty()) totalRevenue / rides.size else 0.0
-    val fuelCost     = totalKm * 0.18
-    val taxCost      = totalRevenue * 0.15
+    val fuelCost     = totalKm * settings.fuelCostPerKm
+    val taxCost      = totalRevenue * settings.taxPercent / 100.0
     val netProfit    = totalRevenue - fuelCost - taxCost
 
     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        // Stats row
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            MiniStat("Среден курс", "%.2f лв".format(avgPerRide), Gold)
-            MiniStat("Бакшиши", "%.2f лв".format(totalTips), Purple)
-            MiniStat("Престой", "%.0f мин".format(totalWait), Muted)
-            MiniStat("Печалба", "%.2f лв".format(netProfit), Green)
+            MiniStat(st.avgRideLabel,   settings.formatPrice(avgPerRide), Gold)
+            MiniStat(st.tipsLabel,      settings.formatPrice(totalTips),  Purple)
+            MiniStat(st.waitLabelShort, "%.0f ${st.minAbbr}".format(totalWait), Muted)
+            MiniStat(st.profitLabel,    settings.formatPrice(netProfit),  Green)
         }
 
         HorizontalDivider(color = Muted.copy(alpha = 0.15f))
 
-        // Ride list
         if (rides.isEmpty()) {
-            Text("Няма курсове в тази смяна.", color = Muted, fontSize = 12.sp)
+            Text(st.noRidesInShift, color = Muted, fontSize = 12.sp)
         } else {
             rides.forEachIndexed { idx, ride ->
                 val label = when {
@@ -216,7 +226,7 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<com.taxipro.data.db.Ride>
                         ride.toAddress.substringBefore(",").take(16)
                     ride.fromAddress.isNotEmpty() ->
                         ride.fromAddress.substringBefore(",").take(28)
-                    else -> "Курс #${ride.globalId}"
+                    else -> "${st.ridePrefix}${ride.globalId}"
                 }
                 Row(
                     Modifier.fillMaxWidth().padding(vertical = 4.dp),
@@ -230,7 +240,7 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<com.taxipro.data.db.Ride>
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     Text(
-                        "%.2f лв".format(ride.price),
+                        settings.formatPrice(ride.price),
                         color = Gold, fontSize = 12.sp,
                         fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace
                     )

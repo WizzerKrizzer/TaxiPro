@@ -3,8 +3,10 @@ package com.taxipro.data.db
 import android.content.Context
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 
 val Context.dataStore by preferencesDataStore(name = "taxi_settings")
 
@@ -40,8 +42,8 @@ data class AppSettings(
     val hourlyRate: Double            = 0.0,
 
     // ── Разходи ──
-    val taxPercent: Double            = 15.0,
-    val fuelCostPerKm: Double         = 0.18,
+    val taxPercent: Double            = 0.0,
+    val fuelCostPerKm: Double         = 0.0,
 
     // ── Валута ──
     val currency: Currency            = Currency.EUR,
@@ -49,7 +51,7 @@ data class AppSettings(
     val gbpRate: Double               = 0.86,
 
     // ── GPS ──
-    val waitSpeedThresholdKmh: Double = 5.0,
+    val waitSpeedThresholdKmh: Double = 0.0,
     val gpsIntervalMs: Long           = 1000L,
     val gpsMinDistanceM: Float        = 5f,
 
@@ -100,13 +102,13 @@ class SettingsRepository(private val context: Context) {
             pricePerKm            = p[Keys.PRICE_PER_KM]   ?: 0.0,
             pricePerMinute        = p[Keys.PRICE_PER_MIN]  ?: 0.0,
             hourlyRate            = p[Keys.HOURLY_RATE]    ?: 0.0,
-            taxPercent            = p[Keys.TAX_PERCENT]    ?: 15.0,
-            fuelCostPerKm         = p[Keys.FUEL_COST]      ?: 0.18,
+            taxPercent            = p[Keys.TAX_PERCENT]    ?: 0.0,
+            fuelCostPerKm         = p[Keys.FUEL_COST]      ?: 0.0,
             currency              = Currency.entries.firstOrNull {
                 it.code == p[Keys.CURRENCY] } ?: Currency.EUR,
             usdRate               = p[Keys.USD_RATE]       ?: 1.08,
             gbpRate               = p[Keys.GBP_RATE]       ?: 0.86,
-            waitSpeedThresholdKmh = p[Keys.WAIT_THRESHOLD] ?: 5.0,
+            waitSpeedThresholdKmh = p[Keys.WAIT_THRESHOLD] ?: 0.0,
             gpsIntervalMs         = p[Keys.GPS_INTERVAL]   ?: 1000L,
             gpsMinDistanceM       = p[Keys.GPS_DISTANCE]   ?: 5f,
             language              = AppLanguage.entries.firstOrNull {
@@ -134,6 +136,17 @@ class SettingsRepository(private val context: Context) {
     suspend fun setGpsDistance(v: Float)         = update { it[Keys.GPS_DISTANCE]   = v }
     suspend fun setLanguage(v: AppLanguage)      = update { it[Keys.LANGUAGE]       = v.code }
     suspend fun setDistanceUnit(v: DistanceUnit) = update { it[Keys.DISTANCE_UNIT]  = v.name }
+
+    /** Fetches USD and GBP rates vs EUR from api.frankfurter.app (no API key needed).
+     *  Returns Pair(usdRate, gbpRate) or null on failure. */
+    suspend fun fetchLiveRates(): Pair<Double, Double>? = withContext(Dispatchers.IO) {
+        try {
+            val url  = java.net.URL("https://api.frankfurter.app/latest?base=EUR&symbols=USD,GBP")
+            val json = url.readText()
+            val obj  = org.json.JSONObject(json).getJSONObject("rates")
+            Pair(obj.getDouble("USD"), obj.getDouble("GBP"))
+        } catch (_: Exception) { null }
+    }
 
     suspend fun saveAll(s: AppSettings) = update { p ->
         p[Keys.START_FEE]      = s.startFee

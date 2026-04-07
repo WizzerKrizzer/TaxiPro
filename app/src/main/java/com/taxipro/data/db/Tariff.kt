@@ -15,6 +15,10 @@ data class Tariff(
     val autoEnabled: Boolean = false,   // автоматично активиране в определен час
     val autoStartHour: Int = 22,        // от кой час
     val autoEndHour: Int = 6,           // до кой час
+    // Per-tariff cost settings
+    val waitThresholdKmh: Double = 0.0, // speed below which wait time is counted
+    val taxPercent: Double = 0.0,       // tax & insurance %
+    val fuelCostPerKm: Double = 0.0,    // fuel cost per km
 )
 
 @Dao

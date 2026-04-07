@@ -26,6 +26,8 @@ import com.taxipro.data.db.*
 import com.taxipro.data.network.DirectionsApi
 import com.taxipro.data.network.DirectionRoute
 import com.taxipro.data.network.decodePolyline
+import com.taxipro.ui.theme.LocalSettings
+import com.taxipro.ui.theme.LocalStrings
 import com.taxipro.ui.viewmodel.TrackingViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -63,7 +65,8 @@ private data class RouteResult(
 fun RouteCalculatorScreen(vm: TrackingViewModel, settingsRepo: SettingsRepository) {
     val context  = LocalContext.current
     val scope    = rememberCoroutineScope()
-    val settings by vm.settings.collectAsState()
+    val st       = LocalStrings.current
+    val settings = LocalSettings.current
     val tariffs  by vm.tariffs.collectAsState()
 
     var fromText by remember { mutableStateOf("") }
@@ -139,7 +142,7 @@ fun RouteCalculatorScreen(vm: TrackingViewModel, settingsRepo: SettingsRepositor
 
     fun doCalculate() {
         if (fromText.isBlank() || toText.isBlank()) {
-            errorMsg = "Въведи начална и крайна точка"
+            errorMsg = st.enterFromTo
             return
         }
         isLoading = true; errorMsg = null
@@ -149,16 +152,16 @@ fun RouteCalculatorScreen(vm: TrackingViewModel, settingsRepo: SettingsRepositor
                 val resp = api.getDirections(fromText.trim(), toText.trim(), apiKey = apiKey)
                 if (resp.status != "OK" || resp.routes.isEmpty()) {
                     errorMsg = when (resp.status) {
-                        "ZERO_RESULTS"   -> "Не е намерен маршрут"
-                        "NOT_FOUND"      -> "Адресът не е намерен"
-                        "REQUEST_DENIED" -> "Directions API не е активиран за този ключ"
-                        else             -> "Грешка: ${resp.status}"
+                        "ZERO_RESULTS"   -> st.noRouteFound
+                        "NOT_FOUND"      -> st.addressNotFound
+                        "REQUEST_DENIED" -> st.directionsApiError
+                        else             -> "Error: ${resp.status}"
                     }
                 } else {
                     routes = resp.routes.take(3).map { buildRouteResult(it) }
                 }
             } catch (e: Exception) {
-                errorMsg = "Мрежова грешка: ${e.localizedMessage}"
+                errorMsg = "${st.networkError} ${e.localizedMessage}"
             } finally {
                 isLoading = false
             }
@@ -172,14 +175,14 @@ fun RouteCalculatorScreen(vm: TrackingViewModel, settingsRepo: SettingsRepositor
             .verticalScroll(rememberScrollState())
             .padding(16.dp)
     ) {
-        Text("Калкулатор", color = Gold, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text(st.calculatorLabel, color = Gold, fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(4.dp))
-        Text("Изчисли цена по маршрут", color = Muted, fontSize = 13.sp)
+        Text(st.calculatorSub, color = Muted, fontSize = 13.sp)
         Spacer(Modifier.height(16.dp))
 
         // Tariff selector
         if (tariffs.isNotEmpty()) {
-            Text("Тарифа", color = Muted, fontSize = 12.sp)
+            Text(st.tariffLabel, color = Muted, fontSize = 12.sp)
             Spacer(Modifier.height(6.dp))
             Row(
                 Modifier
@@ -187,17 +190,6 @@ fun RouteCalculatorScreen(vm: TrackingViewModel, settingsRepo: SettingsRepositor
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                FilterChip(
-                    selected = selectedTariff == null,
-                    onClick  = { selectedTariff = null },
-                    label    = { Text("По подразб.", fontSize = 13.sp) },
-                    colors   = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = Gold.copy(alpha = 0.2f),
-                        selectedLabelColor     = Gold,
-                        containerColor         = Card,
-                        labelColor             = Muted,
-                    )
-                )
                 tariffs.forEach { t ->
                     FilterChip(
                         selected = selectedTariff?.id == t.id,
@@ -219,7 +211,7 @@ fun RouteCalculatorScreen(vm: TrackingViewModel, settingsRepo: SettingsRepositor
         AddressInputField(
             value         = fromText,
             onValueChange = { fromText = it },
-            label         = "Начална точка",
+            label         = st.fromPointLabel,
             accentColor   = Green,
             api           = api,
             apiKey        = apiKey,
@@ -230,7 +222,7 @@ fun RouteCalculatorScreen(vm: TrackingViewModel, settingsRepo: SettingsRepositor
         // Swap
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
             IconButton(onClick = { val t = fromText; fromText = toText; toText = t }) {
-                Icon(Icons.Default.SwapVert, "Размени", tint = Gold)
+                Icon(Icons.Default.SwapVert, st.swapLabel, tint = Gold)
             }
         }
         Spacer(Modifier.height(4.dp))
@@ -239,7 +231,7 @@ fun RouteCalculatorScreen(vm: TrackingViewModel, settingsRepo: SettingsRepositor
         AddressInputField(
             value         = toText,
             onValueChange = { toText = it },
-            label         = "Крайна точка",
+            label         = st.toPointLabel,
             accentColor   = Red,
             api           = api,
             apiKey        = apiKey,
@@ -258,11 +250,11 @@ fun RouteCalculatorScreen(vm: TrackingViewModel, settingsRepo: SettingsRepositor
             if (isLoading) {
                 CircularProgressIndicator(Modifier.size(24.dp), color = Dark, strokeWidth = 2.dp)
                 Spacer(Modifier.width(8.dp))
-                Text("Изчисляване...", color = Dark, fontWeight = FontWeight.Bold)
+                Text(st.calculating, color = Dark, fontWeight = FontWeight.Bold)
             } else {
                 Icon(Icons.Default.Calculate, null, tint = Dark)
                 Spacer(Modifier.width(8.dp))
-                Text("Изчисли маршрути", color = Dark, fontWeight = FontWeight.Bold)
+                Text(st.calculateRoutes, color = Dark, fontWeight = FontWeight.Bold)
             }
         }
 
@@ -285,7 +277,7 @@ fun RouteCalculatorScreen(vm: TrackingViewModel, settingsRepo: SettingsRepositor
         if (routes.isNotEmpty()) {
             Spacer(Modifier.height(18.dp))
             Text(
-                "${routes.size} маршрут${if (routes.size > 1) "а" else ""}",
+                "${routes.size} ${if (routes.size > 1) st.routesPlural else st.routesSingle}",
                 color = Gold, fontSize = 16.sp, fontWeight = FontWeight.SemiBold
             )
             Spacer(Modifier.height(10.dp))
@@ -298,9 +290,9 @@ fun RouteCalculatorScreen(vm: TrackingViewModel, settingsRepo: SettingsRepositor
                     Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    PricingChip("Старт", settings.formatPrice(activeStartFee()))
-                    PricingChip("/km", settings.formatPrice(activePricePerKm()))
-                    PricingChip("/мин", settings.formatPrice(activePricePerMin()))
+                    PricingChip(st.startFeeLabel, settings.formatPrice(activeStartFee()))
+                    PricingChip(st.perKmLabel,    settings.formatPrice(activePricePerKm()))
+                    PricingChip(st.perMinLabel,   settings.formatPrice(activePricePerMin()))
                 }
             }
             Spacer(Modifier.height(10.dp))
@@ -348,8 +340,14 @@ private fun AddressInputField(
     apiKey: String,
     onMyLocation: (String) -> Unit,
 ) {
-    val context = LocalContext.current
-    val scope   = rememberCoroutineScope()
+    val context  = LocalContext.current
+    val scope    = rememberCoroutineScope()
+    val settings = LocalSettings.current
+    // Use app language for autocomplete results; fall back to "en"
+    val apiLang  = when (settings.language.code) {
+        "bg" -> "bg"
+        else -> "en"
+    }
 
     var suggestions    by remember { mutableStateOf<List<String>>(emptyList()) }
     var showDropdown   by remember { mutableStateOf(false) }
@@ -364,7 +362,7 @@ private fun AddressInputField(
         }
         delay(350)
         try {
-            val resp = api.autocomplete(input = value, apiKey = apiKey)
+            val resp = api.autocomplete(input = value, apiKey = apiKey, language = apiLang)
             suggestions  = resp.predictions.map { it.description }
             showDropdown = suggestions.isNotEmpty()
         } catch (_: Exception) {
@@ -397,8 +395,9 @@ private fun AddressInputField(
                                 }
                                 if (loc != null) {
                                     val resp = api.reverseGeocode(
-                                        latLng = "${loc.latitude},${loc.longitude}",
-                                        apiKey = apiKey
+                                        latLng   = "${loc.latitude},${loc.longitude}",
+                                        apiKey   = apiKey,
+                                        language = apiLang,
                                     )
                                     val addr = resp.results.firstOrNull()?.formatted_address
                                     if (addr != null) {
@@ -412,7 +411,7 @@ private fun AddressInputField(
                             finally { locLoading = false }
                         }
                     }) {
-                        Icon(Icons.Default.MyLocation, "Моето местоположение", tint = Gold)
+                        Icon(Icons.Default.MyLocation, LocalStrings.current.myLocationLabel, tint = Gold)
                     }
                 }
             },
@@ -482,6 +481,7 @@ private fun RouteCard(
     isSaved: Boolean,
     onSave: () -> Unit,
 ) {
+    val st = LocalStrings.current
     Card(
         colors = CardDefaults.cardColors(containerColor = Card),
         shape  = RoundedCornerShape(12.dp),
@@ -506,9 +506,9 @@ private fun RouteCard(
             Spacer(Modifier.height(12.dp))
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                MetricCol(Icons.Default.Straighten, "Разстояние", settings.formatDistance(route.distanceKm))
-                MetricCol(Icons.Default.Timer, "Време", fmtDuration(route.durationMin))
-                MetricCol(Icons.Default.PauseCircle, "Престой", fmtDuration(route.estimatedWaitMin))
+                MetricCol(Icons.Default.Straighten, st.distanceField, settings.formatDistance(route.distanceKm))
+                MetricCol(Icons.Default.Timer, st.timeLabel, fmtDuration(route.durationMin, st.secAbbr, st.minAbbr))
+                MetricCol(Icons.Default.PauseCircle, st.waitTimeField, fmtDuration(route.estimatedWaitMin, st.secAbbr, st.minAbbr))
             }
             Spacer(Modifier.height(12.dp))
 
@@ -517,15 +517,15 @@ private fun RouteCard(
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Column {
-                    Text("Разстояние", color = Muted, fontSize = 11.sp)
+                    Text(st.distanceField, color = Muted, fontSize = 11.sp)
                     Text(settings.formatPrice(route.distanceCost), color = Color.White, fontSize = 13.sp)
                 }
                 Column {
-                    Text("Престой", color = Muted, fontSize = 11.sp)
+                    Text(st.waitTimeField, color = Muted, fontSize = 11.sp)
                     Text(settings.formatPrice(route.waitCost), color = Color.White, fontSize = 13.sp)
                 }
                 Column(horizontalAlignment = Alignment.End) {
-                    Text("Общо", color = Gold, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Text(st.totalLabel, color = Gold, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     Text(settings.formatPrice(route.fare), color = Gold, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                 }
             }
@@ -544,11 +544,11 @@ private fun RouteCard(
                 if (isSaved) {
                     Icon(Icons.Default.Check, null, tint = Green, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text("Запазен като курс", color = Green, fontSize = 13.sp)
+                    Text(st.savedAsRide, color = Green, fontSize = 13.sp)
                 } else {
                     Icon(Icons.Default.Save, null, tint = Dark, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text("Запази като курс", color = Dark, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    Text(st.saveAsRide, color = Dark, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -607,10 +607,11 @@ private fun RoutesMapView(routes: List<RouteResult>) {
                 }
             }
             // Start marker
+            val mapSt = LocalStrings.current
             routes.first().decodedPoints.firstOrNull()?.let { pt ->
                 Marker(
                     state   = MarkerState(position = pt),
-                    title   = "Начало",
+                    title   = mapSt.startMarker,
                     snippet = routes.first().fromAddress.substringBefore(","),
                 )
             }
@@ -618,7 +619,7 @@ private fun RoutesMapView(routes: List<RouteResult>) {
             routes.first().decodedPoints.lastOrNull()?.let { pt ->
                 Marker(
                     state   = MarkerState(position = pt),
-                    title   = "Край",
+                    title   = mapSt.endMarker,
                     snippet = routes.first().toAddress.substringBefore(","),
                 )
             }
@@ -668,7 +669,7 @@ private fun PricingChip(label: String, value: String) {
     }
 }
 
-private fun fmtDuration(minutes: Double): String {
+private fun fmtDuration(minutes: Double, secAbbr: String, minAbbr: String): String {
     val sec = (minutes * 60).toLong()
-    return if (sec < 60) "${sec} сек" else "%d:%02d мин".format(sec / 60, sec % 60)
+    return if (sec < 60) "$sec $secAbbr" else "%d:%02d $minAbbr".format(sec / 60, sec % 60)
 }

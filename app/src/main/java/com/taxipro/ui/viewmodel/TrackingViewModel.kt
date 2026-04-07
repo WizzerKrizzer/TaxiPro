@@ -109,7 +109,7 @@ class TrackingViewModel(app: Application) : AndroidViewModel(app) {
             putExtra("startFee",      tariff?.startFee       ?: s.startFee)
             putExtra("pricePerKm",    tariff?.pricePerKm     ?: s.pricePerKm)
             putExtra("pricePerMin",   tariff?.pricePerMinute ?: s.pricePerMinute)
-            putExtra("waitThreshold", s.waitSpeedThresholdKmh)
+            putExtra("waitThreshold", tariff?.waitThresholdKmh ?: 0.0)
             putExtra("gpsInterval",   s.gpsIntervalMs)
             putExtra("gpsDistance",   s.gpsMinDistanceM)
         }

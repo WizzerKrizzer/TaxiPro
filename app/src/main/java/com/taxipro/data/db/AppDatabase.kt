@@ -3,7 +3,7 @@ package com.taxipro.data.db
 import android.content.Context
 import androidx.room.*
 
-@Database(entities = [Ride::class, Tariff::class, Shift::class], version = 3, exportSchema = false)
+@Database(entities = [Ride::class, Tariff::class, Shift::class], version = 4, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun rideDao(): RideDao
     abstract fun tariffDao(): TariffDao

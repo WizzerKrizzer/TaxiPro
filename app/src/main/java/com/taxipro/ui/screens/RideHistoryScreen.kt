@@ -275,7 +275,7 @@ private fun HistoryRideCard(ride: Ride, isExpanded: Boolean, onToggle: () -> Uni
                         color = Muted, fontSize = 11.sp
                     )
                     Text(
-                        "%.1f ${settings.distanceUnit.shortLabel}  •  %.0f мин престой".format(ride.kilometers, ride.waitMinutes),
+                        "%.1f ${settings.distanceUnit.shortLabel}  •  %.0f ${st.waitSuffix}".format(ride.kilometers, ride.waitMinutes),
                         color = Muted, fontSize = 11.sp
                     )
                 }

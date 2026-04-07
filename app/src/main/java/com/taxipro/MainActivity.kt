@@ -22,6 +22,14 @@ import com.taxipro.data.db.AppSettings
 import com.taxipro.data.db.SettingsRepository
 import com.taxipro.ui.screens.*
 import com.taxipro.ui.theme.*
+import com.taxipro.ui.theme.ArStrings
+import com.taxipro.ui.theme.DeStrings
+import com.taxipro.ui.theme.EsStrings
+import com.taxipro.ui.theme.FrStrings
+import com.taxipro.ui.theme.JaStrings
+import com.taxipro.ui.theme.PtStrings
+import com.taxipro.ui.theme.RuStrings
+import com.taxipro.ui.theme.ZhStrings
 import com.taxipro.ui.viewmodel.TrackingViewModel
 import com.taxipro.ui.viewmodel.RideViewModel
 
@@ -39,7 +47,18 @@ class MainActivity : ComponentActivity() {
 
             var permissionGranted by remember { mutableStateOf(hasGps) }
             val settings by settingsRepo.settings.collectAsState(initial = AppSettings())
-            val strings = if (settings.language == AppLanguage.BG) BgStrings else EnStrings
+            val strings = when (settings.language) {
+                AppLanguage.BG -> BgStrings
+                AppLanguage.ES -> EsStrings
+                AppLanguage.DE -> DeStrings
+                AppLanguage.FR -> FrStrings
+                AppLanguage.RU -> RuStrings
+                AppLanguage.PT -> PtStrings
+                AppLanguage.ZH -> ZhStrings
+                AppLanguage.JA -> JaStrings
+                AppLanguage.AR -> ArStrings
+                else           -> EnStrings
+            }
 
             CompositionLocalProvider(
                 LocalStrings provides strings,
@@ -73,6 +92,7 @@ fun MainApp(vm: TrackingViewModel, settingsRepo: SettingsRepository) {
 
     val activeTab = when (selected) {
         "история", "история_смени", "calc", "map" -> "more"
+        "advanced_settings" -> "settings"
         else -> selected
     }
 
@@ -110,15 +130,16 @@ fun MainApp(vm: TrackingViewModel, settingsRepo: SettingsRepository) {
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
             when (selected) {
-                "ride"          -> ActiveRideScreen(vm)
+                "ride"          -> ActiveRideScreen(vm, rideVm)
                 "stats"         -> StatsScreen(rideVm)
-                "settings"      -> SettingsScreen(settingsRepo, vm)
+                "settings"      -> SettingsScreen(settingsRepo, vm, onNavigate = { selected = it })
+                "advanced_settings" -> AdvancedSettingsScreen(settingsRepo, onBack = { selected = "settings" })
                 "more"          -> MoreMenuScreen(onNavigate = { selected = it })
                 "история"       -> RideHistoryScreen(rideVm)
                 "история_смени" -> ShiftHistoryScreen(rideVm)
                 "calc"          -> RouteCalculatorScreen(vm, settingsRepo)
                 "map"           -> MapScreen(vm)
-                else            -> ActiveRideScreen(vm)
+                else            -> ActiveRideScreen(vm, rideVm)
             }
         }
     }

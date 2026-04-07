@@ -14,14 +14,16 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.taxipro.ui.theme.LocalStrings
 
 @Composable
 fun MoreMenuScreen(onNavigate: (String) -> Unit) {
+    val st = LocalStrings.current
     val items = listOf(
-        MoreItem("история",       Icons.Default.History,       "История на курсове", "Преглед на всички курсове",  Gold),
-        MoreItem("история_смени", Icons.Default.WorkHistory,   "История на смени",   "Преглед по работни смени",   Green),
-        MoreItem("calc",          Icons.Default.Calculate,     "Калкулатор",         "Изчисли цена по маршрут",    Blue),
-        MoreItem("map",           Icons.Default.Map,           "Карта",              "Текуща позиция и маршрут",   Purple),
+        MoreItem("история",       Icons.Default.History,     st.rideHistoryTitle,  st.rideHistorySub,   Gold),
+        MoreItem("история_смени", Icons.Default.WorkHistory, st.shiftHistoryTitle, st.shiftHistorySub,  Green),
+        MoreItem("calc",          Icons.Default.Calculate,   st.calculatorLabel,   st.calculatorSub,    Blue),
+        MoreItem("map",           Icons.Default.Map,         st.mapLabel,          st.mapSub,           Purple),
     )
 
     Column(
@@ -31,8 +33,8 @@ fun MoreMenuScreen(onNavigate: (String) -> Unit) {
             .padding(16.dp)
     ) {
         Spacer(Modifier.height(8.dp))
-        Text("Още", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-        Text("Допълнителни функции", color = Muted, fontSize = 13.sp)
+        Text(st.moreTitle, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text(st.moreSub, color = Muted, fontSize = 13.sp)
         Spacer(Modifier.height(20.dp))
 
         items.forEach { item ->

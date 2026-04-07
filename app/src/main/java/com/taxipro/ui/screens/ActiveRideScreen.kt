@@ -23,6 +23,8 @@ import com.taxipro.data.db.formatPrice
 import com.taxipro.data.db.formatDistance
 import com.taxipro.ui.theme.LocalStrings
 import com.taxipro.ui.theme.LocalSettings
+import com.taxipro.data.db.Ride
+import com.taxipro.ui.viewmodel.RideViewModel
 import com.taxipro.ui.viewmodel.TrackingViewModel
 import com.taxipro.ui.viewmodel.TrackingState
 import kotlinx.coroutines.delay
@@ -39,7 +41,7 @@ val Blue   = Color(0xFF4A9EFF)
 val Purple = Color(0xFFA78BFA)
 
 @Composable
-fun ActiveRideScreen(vm: TrackingViewModel) {
+fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
     val state       by vm.state.collectAsState()
     val settings    = LocalSettings.current
     val activeShift by vm.activeShift.collectAsState()
@@ -54,6 +56,10 @@ fun ActiveRideScreen(vm: TrackingViewModel) {
     val tariffs        by vm.tariffs.collectAsState()
     val currentHour    = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
     var selectedTariff by remember { mutableStateOf<Tariff?>(null) }
+
+    // Статистики за Profit Preview
+    val allRides  by rideVm.allRides.collectAsState(initial = emptyList())
+    val allShifts by rideVm.allShifts.collectAsState(initial = emptyList())
 
     // Авто-избор на тарифа при зареждане
     LaunchedEffect(tariffs) {
@@ -139,6 +145,9 @@ fun ActiveRideScreen(vm: TrackingViewModel) {
                         vm.startRide(selectedTariff)
                     }
                 }
+
+                // ── Profit Preview ────────────────────────────
+                ProfitPreviewCard(selectedTariff, settings, allRides, allShifts)
             }
             state.isTracking -> {
                 RideControls(
@@ -322,6 +331,111 @@ fun ActiveRideScreen(vm: TrackingViewModel) {
                 }) { Text(st.cancelBtn, color = Muted) }
             }
         )
+    }
+}
+
+// ── Profit Preview Card ─────────────────────────────────────────
+@Composable
+fun ProfitPreviewCard(
+    tariff: Tariff?,
+    settings: AppSettings,
+    allRides: List<Ride>,
+    allShifts: List<Shift>,
+) {
+    val st  = LocalStrings.current
+    val sym = settings.currency.symbol
+
+    // ── Compute stats from history ───────────────────────────
+    val completedShifts = allShifts.filter { !it.isActive && it.endTime > 0 }
+    val totalHours      = completedShifts.sumOf { (it.endTime - it.startTime) / 3_600_000.0 }
+    val totalRevenue    = allRides.sumOf { it.price }
+    val totalKm         = allRides.sumOf { it.kilometers }
+    val hasEnoughData   = completedShifts.isNotEmpty() && totalHours >= 0.5 && totalRevenue > 0.0
+
+    // ── 8h estimate (requires stats) ────────────────────────
+    val avgRevenuePerHour = if (totalHours > 0) totalRevenue / totalHours else 0.0
+    val avgKmPerHour      = if (totalHours > 0) totalKm / totalHours else 0.0
+    val gross8h           = avgRevenuePerHour * 8.0
+    val fuel8h            = avgKmPerHour * 8.0 * (tariff?.fuelCostPerKm ?: 0.0)
+    val tax8h             = gross8h * (tariff?.taxPercent ?: 0.0) / 100.0
+    val net8h             = gross8h - fuel8h - tax8h
+
+    // ── Per 100 currency breakdown (always available) ───────
+    // Estimate km for 100 revenue: use stats ratio if available, else tariff's pricePerKm
+    val kmPer100 = when {
+        totalRevenue > 0 -> (totalKm / totalRevenue) * 100.0
+        (tariff?.pricePerKm ?: 0.0) > 0 -> 100.0 / tariff!!.pricePerKm
+        else -> 0.0
+    }
+    val fuel100   = kmPer100 * (tariff?.fuelCostPerKm ?: 0.0)
+    val tax100    = 100.0 * (tariff?.taxPercent ?: 0.0) / 100.0
+    val net100    = 100.0 - fuel100 - tax100
+
+    Card(
+        colors   = CardDefaults.cardColors(containerColor = Card),
+        shape    = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+
+            Text(st.profitPreviewTitle, color = Color.White,
+                fontSize = 13.sp, fontWeight = FontWeight.Bold)
+
+            if (tariff == null) {
+                Text(st.profitPreviewNoTariff, color = Muted, fontSize = 12.sp)
+                return@Column
+            }
+
+            // ── Section 1: 8h estimate ───────────────────────
+            Text(st.shift8hTitle, color = Gold,
+                fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
+
+            if (!hasEnoughData) {
+                Text(st.notEnoughDataLabel, color = Muted,
+                    fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Text(st.notEnoughDataSub, color = Muted, fontSize = 11.sp)
+            } else {
+                val rows8h = listOf(
+                    Triple(st.shift8hAvgPerHour, "$sym%.2f".format(avgRevenuePerHour),  Color.White),
+                    Triple(st.shift8hGross,       "+$sym%.2f".format(gross8h),           Color.White),
+                    Triple(st.fuelLabel,          "-$sym%.2f".format(fuel8h),            Red),
+                    Triple(st.taxInsurance,       "-$sym%.2f".format(tax8h),             Red),
+                    Triple(st.shift8hNet,         "+$sym%.2f".format(net8h),             Green),
+                )
+                PreviewRows(rows8h)
+            }
+
+            HorizontalDivider(color = Color(0xFF1E2430))
+
+            // ── Section 2: Per 100 currency breakdown ────────
+            Text(st.per100GrossTitle, color = Gold,
+                fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
+
+            val rows100 = listOf(
+                Triple(st.grossRevenue, "+$sym%.2f".format(100.0),  Color.White),
+                Triple(st.fuelLabel,   "-$sym%.2f".format(fuel100), Red),
+                Triple(st.taxInsurance,"-$sym%.2f".format(tax100),  Red),
+                Triple(st.netProfit,   "+$sym%.2f".format(net100),  Green),
+            )
+            PreviewRows(rows100)
+        }
+    }
+}
+
+@Composable
+private fun PreviewRows(rows: List<Triple<String, String, Color>>) {
+    rows.forEachIndexed { idx, (label, value, color) ->
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment     = Alignment.CenterVertically
+        ) {
+            Text(label, color = Muted, fontSize = 12.sp)
+            Text(value, color = color, fontSize = 12.sp,
+                fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+        }
+        if (idx < rows.lastIndex)
+            HorizontalDivider(color = Color(0xFF1E2430), thickness = 0.5.dp)
     }
 }
 
@@ -649,7 +763,7 @@ fun ShiftBanner(activeShift: Shift?, onStart: () -> Unit, onEnd: () -> Unit) {
         }
         val h   = elapsed / 3600
         val m   = (elapsed % 3600) / 60
-        val dur = if (h > 0) "${h}ч ${m}мин" else "${m}мин"
+        val dur = if (h > 0) "${h}${st.hoursAbbr} ${m}${st.minAbbr}" else "${m}${st.minAbbr}"
 
         Card(
             modifier = Modifier.fillMaxWidth(),

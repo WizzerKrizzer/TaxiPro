@@ -17,6 +17,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.taxipro.data.db.Ride
 import com.taxipro.data.db.Shift
+import com.taxipro.data.db.formatPrice
+import com.taxipro.ui.theme.LocalSettings
+import com.taxipro.ui.theme.LocalStrings
 import com.taxipro.ui.viewmodel.RideViewModel
 import java.text.SimpleDateFormat
 import java.util.*
@@ -33,20 +36,27 @@ fun ShiftSummaryScreen(
 
 @Composable
 fun ShiftSummaryContent(shift: Shift, rides: List<Ride>, onDismiss: () -> Unit) {
-    val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
+    val st       = LocalStrings.current
+    val settings = LocalSettings.current
+    val sdf      = SimpleDateFormat("HH:mm", Locale.getDefault())
 
     val durationMs  = (if (shift.endTime > 0) shift.endTime else System.currentTimeMillis()) - shift.startTime
     val durationH   = durationMs / 3_600_000L
     val durationMin = (durationMs % 3_600_000L) / 60_000L
 
-    val totalRevenue  = rides.sumOf { it.price }
-    val totalTips     = rides.sumOf { it.tip }
-    val totalKm       = rides.sumOf { it.kilometers }
-    val totalWait     = rides.sumOf { it.waitMinutes }
-    val avgPerRide    = if (rides.isNotEmpty()) totalRevenue / rides.size else 0.0
-    val fuelCost      = totalKm * 0.18
-    val taxCost       = totalRevenue * 0.15
-    val netProfit     = totalRevenue - fuelCost - taxCost
+    val totalRevenue = rides.sumOf { it.price }
+    val totalTips    = rides.sumOf { it.tip }
+    val totalKm      = rides.sumOf { it.kilometers }
+    val totalWait    = rides.sumOf { it.waitMinutes }
+    val avgPerRide   = if (rides.isNotEmpty()) totalRevenue / rides.size else 0.0
+    val fuelCost     = totalKm * settings.fuelCostPerKm
+    val taxCost      = totalRevenue * settings.taxPercent / 100.0
+    val netProfit    = totalRevenue - fuelCost - taxCost
+
+    val durStr = buildString {
+        if (durationH > 0) append("${durationH}${st.hoursAbbr} ")
+        append("${durationMin}${st.minAbbr}")
+    }
 
     Column(
         Modifier
@@ -63,11 +73,12 @@ fun ShiftSummaryContent(shift: Shift, rides: List<Ride>, onDismiss: () -> Unit) 
             verticalAlignment     = Alignment.CenterVertically
         ) {
             Column {
-                Text("Смяна #${shift.shiftNumber} завърши",
-                    color = Green, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                 Text(
-                    "${sdf.format(Date(shift.startTime))} – ${sdf.format(Date(shift.endTime))}  •  " +
-                    "${if (durationH > 0) "${durationH}ч " else ""}${durationMin}мин",
+                    st.shiftCompleted.format(shift.shiftNumber),
+                    color = Green, fontSize = 22.sp, fontWeight = FontWeight.Bold
+                )
+                Text(
+                    "${sdf.format(Date(shift.startTime))} – ${sdf.format(Date(shift.endTime))}  •  $durStr",
                     color = Muted, fontSize = 13.sp
                 )
             }
@@ -83,34 +94,42 @@ fun ShiftSummaryContent(shift: Shift, rides: List<Ride>, onDismiss: () -> Unit) 
                 Modifier.padding(20.dp).fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                SummaryStat("Общо приходи", "%.2f лв".format(totalRevenue), Gold)
-                SummaryStat("Чиста печалба", "%.2f лв".format(netProfit), Green)
-                SummaryStat("Бакшиши", "%.2f лв".format(totalTips), Purple)
+                SummaryStat(st.totalRevenue,  settings.formatPrice(totalRevenue), Gold)
+                SummaryStat(st.netProfit,     settings.formatPrice(netProfit),    Green)
+                SummaryStat(st.tipsLabel,     settings.formatPrice(totalTips),    Purple)
             }
         }
 
         // ── Stats grid ───────────────────────────────────────
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            SummaryCard(Icons.Default.DirectionsCar, "Курсове",
-                "${rides.size}", "завършени", Blue, Modifier.weight(1f))
-            SummaryCard(Icons.Default.Straighten, "Километри",
-                "%.1f".format(totalKm), "с клиенти", Muted, Modifier.weight(1f))
+            SummaryCard(
+                Icons.Default.DirectionsCar, st.ridesCompleted,
+                "${rides.size}", st.completedLabel, Blue, Modifier.weight(1f)
+            )
+            SummaryCard(
+                Icons.Default.Straighten, st.kilometersLabel,
+                "%.1f".format(totalKm), st.withClients, Muted, Modifier.weight(1f)
+            )
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            SummaryCard(Icons.Default.ShowChart, "Среден курс",
-                "%.2f лв".format(avgPerRide), "на курс", Gold, Modifier.weight(1f))
-            SummaryCard(Icons.Default.PauseCircle, "Общо престой",
-                "%.0f мин".format(totalWait), "без движение", Muted, Modifier.weight(1f))
+            SummaryCard(
+                Icons.Default.ShowChart, st.avgRideLabel,
+                settings.formatPrice(avgPerRide), st.avgRidePerRide, Gold, Modifier.weight(1f)
+            )
+            SummaryCard(
+                Icons.Default.PauseCircle, st.totalWaitLabel,
+                "%.0f ${st.minAbbr}".format(totalWait), st.noMovement, Muted, Modifier.weight(1f)
+            )
         }
 
         // ── Expense breakdown ─────────────────────────────────
-        StatsSection("💸 Финансова разбивка") {
+        StatsSection(st.financialBreakdown) {
             listOf(
-                Triple("Брутен приход",      "+%.2f лв".format(totalRevenue), Color.White),
-                Triple("Бакшиши",            "+%.2f лв".format(totalTips),    Purple),
-                Triple("Гориво (~0.18/км)",  "-%.2f лв".format(fuelCost),     Red),
-                Triple("Данъци (15%)",        "-%.2f лв".format(taxCost),      Red),
-                Triple("Чиста печалба",      "+%.2f лв".format(netProfit),    Green),
+                Triple(st.grossRevenue,  "+${settings.formatPrice(totalRevenue)}", Color.White),
+                Triple(st.tipsLabel,     "+${settings.formatPrice(totalTips)}",    Purple),
+                Triple(st.fuelBreakdown, "-${settings.formatPrice(fuelCost)}",     Red),
+                Triple(st.taxBreakdown,  "-${settings.formatPrice(taxCost)}",      Red),
+                Triple(st.netProfit,     "+${settings.formatPrice(netProfit)}",    Green),
             ).forEach { (label, value, color) ->
                 Row(
                     Modifier.fillMaxWidth().padding(vertical = 6.dp),
@@ -126,30 +145,36 @@ fun ShiftSummaryContent(shift: Shift, rides: List<Ride>, onDismiss: () -> Unit) 
 
         // ── Ride list ────────────────────────────────────────
         if (rides.isNotEmpty()) {
-            StatsSection("🚖 Курсове в тази смяна") {
+            StatsSection(st.ridesInShift) {
                 rides.forEachIndexed { idx, ride ->
                     val label = when {
                         ride.fromAddress.isNotEmpty() && ride.toAddress.isNotEmpty() ->
                             ride.fromAddress.substringBefore(",").take(18) + " → " +
                             ride.toAddress.substringBefore(",").take(18)
-                        ride.fromAddress.isNotEmpty() -> ride.fromAddress.substringBefore(",").take(30)
-                        else -> "Курс #${ride.globalId}"
+                        ride.fromAddress.isNotEmpty() ->
+                            ride.fromAddress.substringBefore(",").take(30)
+                        else -> "${st.ridePrefix}${ride.globalId}"
                     }
                     Row(
                         Modifier.fillMaxWidth().padding(vertical = 5.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment     = Alignment.CenterVertically
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.weight(1f)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
                             Text("${idx + 1}.", color = Muted, fontSize = 12.sp,
                                 modifier = Modifier.width(22.dp))
                             Text(label, color = Color.White, fontSize = 12.sp,
                                 maxLines = 1,
                                 overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                         }
-                        Text("%.2f лв".format(ride.price), color = Gold, fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                        Text(
+                            settings.formatPrice(ride.price),
+                            color = Gold, fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace
+                        )
                     }
                     if (idx < rides.lastIndex)
                         HorizontalDivider(color = Color(0xFF1E2430), thickness = 0.5.dp)
@@ -167,7 +192,7 @@ fun ShiftSummaryContent(shift: Shift, rides: List<Ride>, onDismiss: () -> Unit) 
         ) {
             Icon(Icons.Default.Done, null, tint = Dark)
             Spacer(Modifier.width(8.dp))
-            Text("Готово", color = Dark, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Text(st.doneBtn, color = Dark, fontSize = 16.sp, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.height(80.dp))
     }

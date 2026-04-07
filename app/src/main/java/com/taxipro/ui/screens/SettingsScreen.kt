@@ -23,7 +23,7 @@ import java.util.Calendar
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(repo: SettingsRepository, vm: TrackingViewModel) {
+fun SettingsScreen(repo: SettingsRepository, vm: TrackingViewModel, onNavigate: (String) -> Unit = {}) {
     val savedSettings by repo.settings.collectAsState(initial = null)
     val tariffs       by vm.tariffs.collectAsState()
     val scope         = rememberCoroutineScope()
@@ -32,6 +32,7 @@ fun SettingsScreen(repo: SettingsRepository, vm: TrackingViewModel) {
     var draft            by remember { mutableStateOf(AppSettings()) }
     var draftInitialized by remember { mutableStateOf(false) }
     var editingTariff    by remember { mutableStateOf<Tariff?>(null) }
+    var rateStatus       by remember { mutableStateOf<String?>(null) }   // null / "loading" / "ok" / "fail"
 
     LaunchedEffect(savedSettings) {
         if (savedSettings != null && !draftInitialized) {
@@ -134,8 +135,52 @@ fun SettingsScreen(repo: SettingsRepository, vm: TrackingViewModel) {
                 }
             }
             Spacer(Modifier.height(10.dp))
-            Text(st.exchangeRatesNote,
-                color = Muted, fontSize = 11.sp)
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment     = Alignment.CenterVertically
+            ) {
+                Text(st.exchangeRatesNote, color = Muted, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                Spacer(Modifier.width(8.dp))
+                OutlinedButton(
+                    onClick = {
+                        rateStatus = "loading"
+                        scope.launch {
+                            val result = repo.fetchLiveRates()
+                            if (result != null) {
+                                val (usd, gbp) = result
+                                draft = draft.copy(usdRate = usd, gbpRate = gbp)
+                                scope.launch { repo.saveAll(draft) }
+                                rateStatus = "ok"
+                            } else {
+                                rateStatus = "fail"
+                            }
+                        }
+                    },
+                    enabled        = rateStatus != "loading",
+                    border         = BorderStroke(1.dp, Gold.copy(alpha = 0.6f)),
+                    shape          = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                ) {
+                    if (rateStatus == "loading") {
+                        CircularProgressIndicator(Modifier.size(14.dp), color = Gold, strokeWidth = 2.dp)
+                        Spacer(Modifier.width(4.dp))
+                        Text(st.fetchingRates, color = Gold, fontSize = 11.sp)
+                    } else {
+                        Text(st.refreshRates, color = Gold, fontSize = 11.sp)
+                    }
+                }
+            }
+            rateStatus?.let { status ->
+                if (status == "ok" || status == "fail") {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        if (status == "ok") st.ratesFetched else st.ratesFailed,
+                        color    = if (status == "ok") Green else Red,
+                        fontSize = 11.sp
+                    )
+                }
+            }
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 SettingsNumField(
@@ -217,48 +262,24 @@ fun SettingsScreen(repo: SettingsRepository, vm: TrackingViewModel) {
             }
         }
 
-        // ── Expenses ──────────────────────────────────────────
-        SectionCard(st.expensesSection) {
-            SettingsRow2(st.taxInsurance, draft.taxPercent, "%") {
-                draft = draft.copy(taxPercent = it)
-            }
-            SettingsRow2("${st.fuelPer} ${draft.distanceUnit.shortLabel}", draft.fuelCostPerKm,
-                "${draft.currency.symbol}/${draft.distanceUnit.shortLabel}") {
-                draft = draft.copy(fuelCostPerKm = it)
-            }
-        }
-
-        // ── GPS ───────────────────────────────────────────────
-        SectionCard(st.gpsSection) {
-            SettingsRow2(st.waitThreshold, draft.waitSpeedThresholdKmh,
-                "${draft.distanceUnit.shortLabel}/h",
-                hint = st.waitThresholdHint) {
-                draft = draft.copy(waitSpeedThresholdKmh = it)
-            }
-            SettingsRow2(st.updateInterval, draft.gpsIntervalMs.toDouble(), "ms",
-                hint = st.updateIntervalHint) {
-                draft = draft.copy(gpsIntervalMs = it.toLong().coerceAtLeast(1000L))
-            }
-        }
-
-        // ── Profit preview ────────────────────────────────────
-        val sym  = draft.currency.symbol
-        val rev  = 100.0
-        val fuel = 80 * draft.fuelCostPerKm
-        val tax  = rev * draft.taxPercent / 100
-        SectionCard("📊  At $sym%.0f revenue (~80 ${draft.distanceUnit.shortLabel})".format(rev)) {
-            listOf(
-                Triple("Gross revenue",   "+$sym%.2f".format(rev),             Color.White),
-                Triple("Fuel",            "-$sym%.2f".format(fuel),            Red),
-                Triple("Tax & insurance", "-$sym%.2f".format(tax),             Red),
-                Triple("Net profit",      "+$sym%.2f".format(rev - fuel - tax), Green),
-            ).forEach { (k, v, c) ->
-                Row(Modifier.fillMaxWidth().padding(vertical = 5.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(k, color = Muted, fontSize = 13.sp)
-                    Text(v, color = c, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        // ── Advanced Settings (nav) ───────────────────────────
+        Card(
+            onClick   = { onNavigate("advanced_settings") },
+            colors    = CardDefaults.cardColors(containerColor = Color(0xFF161A22)),
+            shape     = RoundedCornerShape(14.dp),
+            modifier  = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                Modifier.padding(16.dp).fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment     = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(st.advancedSection, color = Color.White,
+                        fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text(st.advancedSectionSub, color = Muted, fontSize = 11.sp)
                 }
-                HorizontalDivider(color = Color(0xFF1E2430), thickness = 0.5.dp)
+                Icon(Icons.Default.ChevronRight, null, tint = Muted)
             }
         }
 
@@ -304,15 +325,18 @@ fun TariffEditDialog(
     val sym  = currency.symbol
     val unit = distanceUnit.shortLabel
 
-    var name        by remember { mutableStateOf(tariff.name) }
-    var startFee    by remember { mutableStateOf(tariff.startFee) }
-    var pricePerKm  by remember { mutableStateOf(tariff.pricePerKm) }
-    var pricePerMin by remember { mutableStateOf(tariff.pricePerMinute) }
-    var hourlyRate  by remember { mutableStateOf(tariff.hourlyRate) }
-    var autoEnabled by remember { mutableStateOf(tariff.autoEnabled) }
-    var autoStart   by remember { mutableStateOf(tariff.autoStartHour) }
-    var autoEnd     by remember { mutableStateOf(tariff.autoEndHour) }
-    var nameError   by remember { mutableStateOf(false) }
+    var name           by remember { mutableStateOf(tariff.name) }
+    var startFee       by remember { mutableStateOf(tariff.startFee) }
+    var pricePerKm     by remember { mutableStateOf(tariff.pricePerKm) }
+    var pricePerMin    by remember { mutableStateOf(tariff.pricePerMinute) }
+    var hourlyRate     by remember { mutableStateOf(tariff.hourlyRate) }
+    var waitThreshold  by remember { mutableStateOf(tariff.waitThresholdKmh) }
+    var taxPercent     by remember { mutableStateOf(tariff.taxPercent) }
+    var fuelCostPerKm  by remember { mutableStateOf(tariff.fuelCostPerKm) }
+    var autoEnabled    by remember { mutableStateOf(tariff.autoEnabled) }
+    var autoStart      by remember { mutableStateOf(tariff.autoStartHour) }
+    var autoEnd        by remember { mutableStateOf(tariff.autoEndHour) }
+    var nameError      by remember { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -352,7 +376,15 @@ fun TariffEditDialog(
                 TariffNumRow(st.startFeeLabel, startFee,   sym)        { startFee    = it }
                 TariffNumRow("Per $unit",      pricePerKm, "$sym/$unit") { pricePerKm  = it }
                 TariffNumRow(st.perMinWait,    pricePerMin,"$sym/min") { pricePerMin = it }
-                TariffNumRow(st.hourlyRateLabel, hourlyRate, "$sym/h")  { hourlyRate  = it }
+                TariffNumRow(st.hourlyRateLabel, hourlyRate,    "$sym/h")  { hourlyRate  = it }
+                TariffNumRow(st.waitThreshold,  waitThreshold, "$unit/h") { waitThreshold = it }
+
+                HorizontalDivider(color = Color(0xFF1E2430))
+                Text(st.costsLabel, color = Muted, fontSize = 10.sp,
+                    letterSpacing = 1.sp, fontWeight = FontWeight.Bold)
+
+                TariffNumRow(st.taxInsurance,  taxPercent,    "%")       { taxPercent    = it }
+                TariffNumRow(st.fuelPer + " $unit", fuelCostPerKm, "$sym/$unit") { fuelCostPerKm = it }
 
                 HorizontalDivider(color = Color(0xFF1E2430))
 
@@ -396,14 +428,17 @@ fun TariffEditDialog(
                 onClick = {
                     if (name.isBlank()) { nameError = true; return@Button }
                     onSave(tariff.copy(
-                        name           = name.trim(),
-                        startFee       = startFee,
-                        pricePerKm     = pricePerKm,
-                        pricePerMinute = pricePerMin,
-                        hourlyRate     = hourlyRate,
-                        autoEnabled    = autoEnabled,
-                        autoStartHour  = autoStart,
-                        autoEndHour    = autoEnd,
+                        name             = name.trim(),
+                        startFee         = startFee,
+                        pricePerKm       = pricePerKm,
+                        pricePerMinute   = pricePerMin,
+                        hourlyRate       = hourlyRate,
+                        waitThresholdKmh = waitThreshold,
+                        taxPercent       = taxPercent,
+                        fuelCostPerKm    = fuelCostPerKm,
+                        autoEnabled      = autoEnabled,
+                        autoStartHour    = autoStart,
+                        autoEndHour      = autoEnd,
                     ))
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = Gold)
@@ -435,7 +470,11 @@ fun TariffNumRow(label: String, value: Double, suffix: String, onChange: (Double
             horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             OutlinedTextField(
                 value         = text,
-                onValueChange = { text = it },
+                onValueChange = { v ->
+                    text = v
+                    // Update immediately on each keystroke so Save always captures latest value
+                    v.toDoubleOrNull()?.let { onChange(it) }
+                },
                 modifier      = Modifier.width(88.dp).onFocusChanged { fs ->
                     if (isFocused && !fs.isFocused) text.toDoubleOrNull()?.let { onChange(it) }
                     isFocused = fs.isFocused

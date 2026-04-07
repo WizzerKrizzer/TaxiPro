@@ -127,7 +127,7 @@ class GpsTrackingService : Service() {
             startFee              = intent.getDoubleExtra("startFee", 1.50),
             pricePerKm            = intent.getDoubleExtra("pricePerKm", 1.20),
             pricePerMinute        = intent.getDoubleExtra("pricePerMin", 0.25),
-            waitSpeedThresholdKmh = intent.getDoubleExtra("waitThreshold", 5.0),
+            waitSpeedThresholdKmh = intent.getDoubleExtra("waitThreshold", 0.0),
             gpsIntervalMs         = intent.getLongExtra("gpsInterval", 1000L),
             gpsMinDistanceM       = intent.getFloatExtra("gpsDistance", 5f),
         )
