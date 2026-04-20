@@ -19,7 +19,14 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.taxipro.data.db.AppLanguage
 import com.taxipro.data.db.AppSettings
+import com.taxipro.data.db.AppTheme
 import com.taxipro.data.db.SettingsRepository
+import com.taxipro.ui.screens.DarkColors
+import com.taxipro.ui.screens.ForestColors
+import com.taxipro.ui.screens.LightColors
+import com.taxipro.ui.screens.LocalThemeColors
+import com.taxipro.ui.screens.MidnightColors
+import com.taxipro.ui.screens.SunsetColors
 import com.taxipro.ui.screens.*
 import com.taxipro.ui.theme.*
 import com.taxipro.ui.theme.ArStrings
@@ -32,6 +39,7 @@ import com.taxipro.ui.theme.RuStrings
 import com.taxipro.ui.theme.ZhStrings
 import com.taxipro.ui.viewmodel.TrackingViewModel
 import com.taxipro.ui.viewmodel.RideViewModel
+import com.taxipro.ui.viewmodel.PremiumViewModel
 
 
 class MainActivity : ComponentActivity() {
@@ -46,6 +54,12 @@ class MainActivity : ComponentActivity() {
             ) == PackageManager.PERMISSION_GRANTED
 
             var permissionGranted by remember { mutableStateOf(hasGps) }
+            LaunchedEffect(permissionGranted) {
+                if (permissionGranted) {
+                    settingsRepo.detectAndSaveCurrency()
+                }
+            }
+
             val settings by settingsRepo.settings.collectAsState(initial = AppSettings())
             val strings = when (settings.language) {
                 AppLanguage.BG -> BgStrings
@@ -57,12 +71,27 @@ class MainActivity : ComponentActivity() {
                 AppLanguage.ZH -> ZhStrings
                 AppLanguage.JA -> JaStrings
                 AppLanguage.AR -> ArStrings
+                AppLanguage.TR -> EnStrings  // Turkish (coming soon)
+                AppLanguage.HI -> EnStrings  // Hindi (coming soon)
+                AppLanguage.VI -> EnStrings  // Vietnamese (coming soon)
+                AppLanguage.ID -> EnStrings  // Indonesian (coming soon)
+                AppLanguage.IT -> EnStrings  // Italian (coming soon)
+                AppLanguage.KO -> EnStrings  // Korean (coming soon)
                 else           -> EnStrings
+            }
+
+            val themeColors = when (settings.theme) {
+                AppTheme.LIGHT    -> LightColors
+                AppTheme.MIDNIGHT -> MidnightColors
+                AppTheme.SUNSET   -> SunsetColors
+                AppTheme.FOREST   -> ForestColors
+                else              -> DarkColors
             }
 
             CompositionLocalProvider(
                 LocalStrings provides strings,
                 LocalSettings provides settings,
+                LocalThemeColors provides themeColors,
             ) {
                 if (!permissionGranted) {
                     LocationPermissionScreen(onGranted = { permissionGranted = true })
@@ -79,7 +108,9 @@ data class NavItem(val label: String, val icon: ImageVector, val route: String)
 @Composable
 fun MainApp(vm: TrackingViewModel, settingsRepo: SettingsRepository) {
     val rideVm: RideViewModel = viewModel()
+    val premiumVm: PremiumViewModel = viewModel()
     val st = LocalStrings.current
+    val tc = LocalThemeColors.current
 
     val navItems = listOf(
         NavItem(st.navRide,     Icons.Default.Navigation, "ride"),
@@ -91,7 +122,7 @@ fun MainApp(vm: TrackingViewModel, settingsRepo: SettingsRepository) {
     var selected by remember { mutableStateOf("ride") }
 
     val activeTab = when (selected) {
-        "история", "история_смени", "calc", "map" -> "more"
+        "история", "история_смени", "calc", "zones", "zone_creator", "premium" -> "more"
         "advanced_settings" -> "settings"
         else -> selected
     }
@@ -107,9 +138,9 @@ fun MainApp(vm: TrackingViewModel, settingsRepo: SettingsRepository) {
     }
 
     Scaffold(
-        containerColor = Dark,
+        containerColor = tc.background,
         bottomBar = {
-            NavigationBar(containerColor = Color(0xFF111318), tonalElevation = 0.dp) {
+            NavigationBar(containerColor = tc.navBar, tonalElevation = 0.dp) {
                 navItems.forEach { item ->
                     NavigationBarItem(
                         selected = activeTab == item.route,
@@ -117,11 +148,11 @@ fun MainApp(vm: TrackingViewModel, settingsRepo: SettingsRepository) {
                         icon     = { Icon(item.icon, item.label) },
                         label    = { Text(item.label) },
                         colors   = NavigationBarItemDefaults.colors(
-                            selectedIconColor   = Gold,
-                            selectedTextColor   = Gold,
-                            unselectedIconColor = Muted,
-                            unselectedTextColor = Muted,
-                            indicatorColor      = Color(0x33F5C842),
+                            selectedIconColor   = tc.accent,
+                            selectedTextColor   = tc.accent,
+                            unselectedIconColor = tc.muted,
+                            unselectedTextColor = tc.muted,
+                            indicatorColor      = tc.accent.copy(alpha = 0.2f),
                         )
                     )
                 }
@@ -131,14 +162,24 @@ fun MainApp(vm: TrackingViewModel, settingsRepo: SettingsRepository) {
         Box(Modifier.padding(padding).fillMaxSize()) {
             when (selected) {
                 "ride"          -> ActiveRideScreen(vm, rideVm)
-                "stats"         -> StatsScreen(rideVm)
+                "stats"         -> StatsScreen(rideVm, settingsRepo)
                 "settings"      -> SettingsScreen(settingsRepo, vm, onNavigate = { selected = it })
-                "advanced_settings" -> AdvancedSettingsScreen(settingsRepo, onBack = { selected = "settings" })
-                "more"          -> MoreMenuScreen(onNavigate = { selected = it })
+                "advanced_settings" -> AdvancedSettingsScreen(settingsRepo, vm, onBack = { selected = "settings" })
+                "more"          -> MoreMenuScreen(onNavigate = { selected = it }, premiumVm = premiumVm)
+                "premium"       -> PremiumScreen(premiumVm)
                 "история"       -> RideHistoryScreen(rideVm)
                 "история_смени" -> ShiftHistoryScreen(rideVm)
                 "calc"          -> RouteCalculatorScreen(vm, settingsRepo)
-                "map"           -> MapScreen(vm)
+                "zones"         -> {
+                    val zones by rideVm.allZones.collectAsState(initial = emptyList())
+                    ZoneScreen(rideVm = rideVm, onNavigate = { selected = it })
+                }
+                "zone_creator"  -> {
+                    ZoneCreatorScreen(
+                        rideVm = rideVm,
+                        onBack = { selected = "zones" },
+                    )
+                }
                 else            -> ActiveRideScreen(vm, rideVm)
             }
         }
