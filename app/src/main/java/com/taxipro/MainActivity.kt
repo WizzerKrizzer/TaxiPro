@@ -73,7 +73,7 @@ class MainActivity : ComponentActivity() {
                 AppLanguage.AR -> ArStrings
                 AppLanguage.TR -> TrStrings
                 AppLanguage.HI -> HiStrings
-                AppLanguage.VI -> EnStrings  // Vietnamese (coming soon)
+                AppLanguage.VI -> ViStrings
                 AppLanguage.ID -> EnStrings  // Indonesian (coming soon)
                 AppLanguage.IT -> EnStrings  // Italian (coming soon)
                 AppLanguage.KO -> EnStrings  // Korean (coming soon)
