@@ -95,7 +95,7 @@ fun SettingsScreen(repo: SettingsRepository, vm: TrackingViewModel, onNavigate: 
                     modifier = Modifier.background(tc.cardAlt)
                 ) {
                     AppLanguage.entries.forEach { lang ->
-                        val isWorking = lang == AppLanguage.EN || lang == AppLanguage.BG || lang == AppLanguage.DE || lang == AppLanguage.ES || lang == AppLanguage.PT || lang == AppLanguage.FR || lang == AppLanguage.RU || lang == AppLanguage.AR || lang == AppLanguage.JA || lang == AppLanguage.ZH || lang == AppLanguage.TR
+                        val isWorking = lang == AppLanguage.EN || lang == AppLanguage.BG || lang == AppLanguage.DE || lang == AppLanguage.ES || lang == AppLanguage.PT || lang == AppLanguage.FR || lang == AppLanguage.RU || lang == AppLanguage.AR || lang == AppLanguage.JA || lang == AppLanguage.ZH || lang == AppLanguage.TR || lang == AppLanguage.HI
                         DropdownMenuItem(
                             text = {
                                 Row(
