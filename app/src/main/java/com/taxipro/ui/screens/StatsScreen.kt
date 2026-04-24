@@ -698,7 +698,8 @@ fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
                         }
                         rev
                     }
-                    val bestHourAll = hourRevAll.indices.maxByOrNull { hourRevAll[it] } ?: 0
+                    val bestHourAll  = hourRevAll.indices.maxByOrNull { hourRevAll[it] } ?: 0
+                    val currentHour  = remember { Calendar.getInstance().get(Calendar.HOUR_OF_DAY) }
 
                     Text(st.revenueByHour, color = tc.muted, fontSize = 11.sp)
                     Spacer(Modifier.height(6.dp))
@@ -707,7 +708,8 @@ fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
                             (if (h % 6 == 0) "${h}${st.hoursAbbr}" else "") to hourRevAll[h]
                         },
                         color          = Color(0xFFFF9A3C),
-                        highlightIndex = bestHourAll,
+                        highlightIndex = currentHour,     // orange bar = current hour of day
+                        highlightColor = TodayBarColor,
                         maxBarHeight   = 60,
                         showValues     = false,
                         kmData         = (0..23).map { hourKm[it] },
@@ -1069,11 +1071,14 @@ private fun LegendDot(color: Color, label: String) {
     }
 }
 
+private val TodayBarColor = Color(0xFFFF9A3C)   // vivid orange — marks "today / current"
+
 @Composable
 private fun BarChart(
     data: List<Pair<String, Double>>,   // (x-label, revenue)
     color: Color,
     highlightIndex: Int = -1,
+    highlightColor: Color = TodayBarColor,  // colour used for the highlighted (today) bar
     maxBarHeight: Int = 80,
     showValues: Boolean = true,
     kmData: List<Double>? = null,       // optional km per bar
@@ -1093,7 +1098,7 @@ private fun BarChart(
     ) {
         data.forEachIndexed { idx, (label, value) ->
             val frac     = (value / maxVal).toFloat().coerceIn(0f, 1f)
-            val barColor = if (idx == highlightIndex) color else color.copy(alpha = 0.45f)
+            val barColor = if (idx == highlightIndex) highlightColor else color.copy(alpha = 0.28f)
             val km       = kmData?.getOrNull(idx) ?: 0.0
             val cnt      = countData?.getOrNull(idx) ?: 0
             Column(
@@ -1148,12 +1153,13 @@ private fun BarChart(
                 Spacer(Modifier.height(3.dp))
                 // X-axis label (supports "\n" for two-line labels like "Пн\n14")
                 Text(
-                    text      = label,
-                    color     = if (idx == highlightIndex) color else tc.muted,
-                    fontSize  = 7.sp,
-                    textAlign = TextAlign.Center,
+                    text       = label,
+                    color      = if (idx == highlightIndex) highlightColor else tc.muted,
+                    fontSize   = if (idx == highlightIndex) 7.5.sp else 7.sp,
+                    fontWeight = if (idx == highlightIndex) FontWeight.Bold else FontWeight.Normal,
+                    textAlign  = TextAlign.Center,
                     lineHeight = 9.sp,
-                    maxLines  = 2,
+                    maxLines   = 2,
                 )
             }
         }
