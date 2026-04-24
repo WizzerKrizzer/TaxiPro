@@ -24,30 +24,27 @@ import com.taxipro.data.db.formatDistance
 import com.taxipro.ui.theme.LocalStrings
 import com.taxipro.ui.theme.LocalSettings
 import com.taxipro.data.db.Ride
+import com.taxipro.data.db.TariffExpense
+import com.taxipro.data.db.ExpenseFrequency
+import com.taxipro.data.db.ExpenseType
+import com.taxipro.data.db.freq
+import com.taxipro.data.db.expType
 import com.taxipro.ui.viewmodel.RideViewModel
 import com.taxipro.ui.viewmodel.TrackingViewModel
 import com.taxipro.ui.viewmodel.TrackingState
 import kotlinx.coroutines.delay
 import java.util.Calendar
 
-// ── Единна цветова схема ──────────────────────────────────────
-val Gold   = Color(0xFFF5C842)
-val Dark   = Color(0xFF0A0C10)
-val Card   = Color(0xFF161A22)
-val Green  = Color(0xFF2ECC8A)
-val Red    = Color(0xFFE85555)
-val Muted  = Color(0xFF6B7280)
-val Blue   = Color(0xFF4A9EFF)
-val Purple = Color(0xFFA78BFA)
-
 @Composable
 fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
+    val tc          = LocalThemeColors.current
     val state       by vm.state.collectAsState()
     val settings    = LocalSettings.current
     val activeShift by vm.activeShift.collectAsState()
     val st          = LocalStrings.current
     var showStop by remember { mutableStateOf(false) }
     var showNoShiftDialog by remember { mutableStateOf(false) }
+    var showEndShiftDialog by remember { mutableStateOf(false) }
     var pendingStart by remember { mutableStateOf<(() -> Unit)?>(null) }
     var tipInput by remember { mutableStateOf("0") }
     var paymentMethod by remember { mutableStateOf("CASH") } // CASH / CARD
@@ -58,8 +55,9 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
     var selectedTariff by remember { mutableStateOf<Tariff?>(null) }
 
     // Статистики за Profit Preview
-    val allRides  by rideVm.allRides.collectAsState(initial = emptyList())
-    val allShifts by rideVm.allShifts.collectAsState(initial = emptyList())
+    val allRides    by rideVm.allRides.collectAsState(initial = emptyList())
+    val allShifts   by rideVm.allShifts.collectAsState(initial = emptyList())
+    val allExpenses by vm.allExpenses.collectAsState()
 
     // Авто-избор на тарифа при зареждане
     LaunchedEffect(tariffs) {
@@ -84,13 +82,21 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Dark)
+            .background(tc.background)
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         // ── Смяна банер ──────────────────────────────────────
-        ShiftBanner(activeShift = activeShift, onStart = { vm.startShift() }, onEnd = { vm.endShift() })
+        ShiftBanner(
+            activeShift   = activeShift,
+            isShiftPaused = state.isShiftPaused,
+            shiftPausedMs = state.shiftPausedMs,
+            onStart  = { vm.startShift() },
+            onEnd    = { showEndShiftDialog = true },
+            onPause  = { vm.pauseShift() },
+            onResume = { vm.resumeShift() },
+        )
 
         // ── Тарифа избор ──
         if (!state.isTracking) {
@@ -115,14 +121,49 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
                 else null)
 
             // Скорост / Таймер + Престой
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                SpeedCard2(displaySpeed, settings, Modifier.weight(1f))
-                WaitCard2(displayWaitSec, Modifier.weight(1f))
+            Row(
+                Modifier.fillMaxWidth().height(IntrinsicSize.Max),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                SpeedCard2(displaySpeed, settings, Modifier.weight(1f).fillMaxHeight())
+                WaitCard2(displayWaitSec, Modifier.weight(1f).fillMaxHeight())
             }
 
             // КМ + Времетраене
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                StatMini2(st.distanceLabel, settings.formatDistance(displayKm), Gold, Modifier.weight(1f))
+                StatMini2(st.distanceLabel, settings.formatDistance(displayKm), tc.accent, Modifier.weight(1f))
+            }
+
+            // ── Диагностичен ред (активни тарифни ставки) ──────
+            // Показва точно какви стойности са подадени към GPS сервиза.
+            // Ако pkm е 0.00, сервизът не начислява приход от км.
+            val sym  = settings.currency.symbol
+            val unit = settings.distanceUnit.shortLabel
+            val pkm  = state.activePricePerKm
+            val pmin = state.activePricePerMin
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(
+                        if (pkm == 0.0) tc.red.copy(alpha = 0.12f)
+                        else tc.surface.copy(alpha = 0.5f),
+                        RoundedCornerShape(8.dp)
+                    )
+                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (pkm == 0.0) {
+                    Icon(Icons.Default.Warning, null,
+                        tint = tc.red, modifier = Modifier.size(12.dp))
+                }
+                Text(
+                    "Ставка: $sym${"%.2f".format(state.activeStartFee)} старт  •  " +
+                    "$sym${"%.2f".format(pkm)}/$unit  •  " +
+                    "$sym${"%.2f".format(pmin)}/мин",
+                    color    = if (pkm == 0.0) tc.red else tc.muted,
+                    fontSize = 10.sp,
+                )
             }
 
             // ── Корекция на сумата ──
@@ -147,7 +188,7 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
                 }
 
                 // ── Profit Preview ────────────────────────────
-                ProfitPreviewCard(selectedTariff, settings, allRides, allShifts)
+                ProfitPreviewCard(selectedTariff, settings, allRides, allShifts, allExpenses)
             }
             state.isTracking -> {
                 RideControls(
@@ -175,14 +216,14 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
     if (showNoShiftDialog) {
         AlertDialog(
             onDismissRequest = { showNoShiftDialog = false; pendingStart = null },
-            containerColor   = Card,
+            containerColor   = tc.card,
             title = {
-                Text(st.noShiftDialogTitle, color = Color.White, fontWeight = FontWeight.Bold)
+                Text(st.noShiftDialogTitle, color = tc.textPrimary, fontWeight = FontWeight.Bold)
             },
             text = {
                 Text(
                     st.noShiftDialogMsg,
-                    color = Muted, lineHeight = 20.sp
+                    color = tc.muted, lineHeight = 20.sp
                 )
             },
             confirmButton = {
@@ -192,12 +233,44 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
                         pendingStart?.invoke()
                         pendingStart = null
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = Gold)
-                ) { Text(st.yesContinue, color = Dark, fontWeight = FontWeight.Bold) }
+                    colors = ButtonDefaults.buttonColors(containerColor = tc.accent)
+                ) { Text(st.yesContinue, color = tc.background, fontWeight = FontWeight.Bold) }
             },
             dismissButton = {
                 TextButton(onClick = { showNoShiftDialog = false; pendingStart = null }) {
-                    Text(st.noGoBack, color = Muted)
+                    Text(st.noGoBack, color = tc.muted)
+                }
+            }
+        )
+    }
+
+    // ── Диалог: потвърди приключване на смяна ──
+    if (showEndShiftDialog) {
+        AlertDialog(
+            onDismissRequest = { showEndShiftDialog = false },
+            containerColor   = tc.card,
+            icon = {
+                Icon(Icons.Default.Flag, null, tint = tc.accent, modifier = Modifier.size(28.dp))
+            },
+            title = {
+                Text(st.endShiftConfirmTitle, color = tc.textPrimary,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            },
+            text = {
+                Text(st.endShiftConfirmMsg, color = tc.muted, fontSize = 13.sp,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            },
+            confirmButton = {
+                Button(
+                    onClick = { showEndShiftDialog = false; vm.endShift() },
+                    colors  = ButtonDefaults.buttonColors(containerColor = tc.accent),
+                    shape   = RoundedCornerShape(10.dp),
+                ) { Text(st.shiftEndBtn, color = tc.background, fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEndShiftDialog = false }) {
+                    Text(st.cancelBtn, color = tc.muted)
                 }
             }
         )
@@ -215,16 +288,16 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
                 showStop = false
                 if (!wasPaused) vm.resumeRide()
             },
-            containerColor   = Card,
+            containerColor   = tc.card,
             title = {
-                Text(st.endOfRide, color = Color.White, fontWeight = FontWeight.Bold)
+                Text(st.endOfRide, color = tc.textPrimary, fontWeight = FontWeight.Bold)
             },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
 
                     // Финална цена
                     Text(settings.formatPrice(totalPrice),
-                        color = Gold, fontSize = 32.sp, fontWeight = FontWeight.Black,
+                        color = tc.accent, fontSize = 32.sp, fontWeight = FontWeight.Black,
                         fontFamily = FontFamily.Monospace)
 
                     // Обобщение на курса
@@ -240,28 +313,28 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
                     }
 
                     Card(
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFF0D1017)),
+                        colors = CardDefaults.cardColors(containerColor = tc.cardAlt),
                         shape  = RoundedCornerShape(10.dp)
                     ) {
                         Column(
                             Modifier.padding(12.dp).fillMaxWidth(),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Text(st.rideSummary, color = Muted, fontSize = 10.sp,
+                            Text(st.rideSummary, color = tc.muted, fontSize = 10.sp,
                                 letterSpacing = 1.sp, fontWeight = FontWeight.Bold)
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text(st.distanceField,  color = Muted, fontSize = 13.sp)
-                                Text(settings.formatDistance(finalKm), color = Color.White,
+                                Text(st.distanceField,  color = tc.muted, fontSize = 13.sp)
+                                Text(settings.formatDistance(finalKm), color = tc.textPrimary,
                                     fontSize = 13.sp, fontWeight = FontWeight.Bold)
                             }
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text(st.durationField,  color = Muted, fontSize = 13.sp)
-                                Text(durDisplay, color = Blue,
+                                Text(st.durationField,  color = tc.muted, fontSize = 13.sp)
+                                Text(durDisplay, color = tc.blue,
                                     fontSize = 13.sp, fontWeight = FontWeight.Bold)
                             }
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text(st.waitTimeField, color = Muted, fontSize = 13.sp)
-                                Text(waitDisplay, color = Purple,
+                                Text(st.waitTimeField, color = tc.muted, fontSize = 13.sp)
+                                Text(waitDisplay, color = tc.purple,
                                     fontSize = 13.sp, fontWeight = FontWeight.Bold)
                             }
                         }
@@ -269,13 +342,13 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
 
                     if (finalAdj != 0.0) {
                         Text("Adjustment: ${if (finalAdj > 0) "+" else ""}${settings.formatPrice(finalAdj)}",
-                            color = if (finalAdj > 0) Green else Red, fontSize = 12.sp)
+                            color = if (finalAdj > 0) tc.green else tc.red, fontSize = 12.sp)
                     }
 
-                    HorizontalDivider(color = Color(0xFF1E2430))
+                    HorizontalDivider(color = tc.surface)
 
                     // Начин на плащане
-                    Text(st.paymentMethod, color = Muted, fontSize = 11.sp,
+                    Text(st.paymentMethod, color = tc.muted, fontSize = 11.sp,
                         fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         listOf("CASH" to st.cash, "CARD" to st.card).forEach { (k, l) ->
@@ -284,33 +357,33 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
                                 onClick  = { paymentMethod = k },
                                 modifier = Modifier.weight(1f),
                                 colors   = ButtonDefaults.buttonColors(
-                                    containerColor = if (sel) Gold else Color(0xFF0A0C10)
+                                    containerColor = if (sel) tc.accent else tc.background
                                 ),
                                 shape  = RoundedCornerShape(8.dp),
-                                border = if (!sel) BorderStroke(1.dp, Color(0xFF1E2430)) else null
+                                border = if (!sel) BorderStroke(1.dp, tc.surface) else null
                             ) {
-                                Text(l, color = if (sel) Dark else Muted,
+                                Text(l, color = if (sel) tc.background else tc.muted,
                                     fontWeight = FontWeight.Bold, fontSize = 12.sp)
                             }
                         }
                     }
 
-                    HorizontalDivider(color = Color(0xFF1E2430))
+                    HorizontalDivider(color = tc.surface)
 
                     // Бакшиш
                     OutlinedTextField(
                         value          = tipInput,
                         onValueChange  = { tipInput = it },
-                        label          = { Text("${st.tipLabel} (${settings.currency.symbol})", color = Muted) },
+                        label          = { Text("${st.tipLabel} (${settings.currency.symbol})", color = tc.muted) },
                         singleLine     = true,
                         keyboardOptions= androidx.compose.foundation.text.KeyboardOptions(
                             keyboardType = androidx.compose.ui.text.input.KeyboardType.Decimal
                         ),
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor   = Gold,
-                            unfocusedBorderColor = Muted,
-                            focusedTextColor     = Color.White,
-                            unfocusedTextColor   = Color.White,
+                            focusedBorderColor   = tc.accent,
+                            unfocusedBorderColor = tc.muted,
+                            focusedTextColor     = tc.textPrimary,
+                            unfocusedTextColor   = tc.textPrimary,
                         )
                     )
                 }
@@ -318,17 +391,17 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
             confirmButton = {
                 Button(
                     onClick = {
-                        vm.stopAndSaveRide(tipInput.toDoubleOrNull() ?: 0.0)
+                        vm.stopAndSaveRide(tipInput.toDoubleOrNull() ?: 0.0, paymentMethod = paymentMethod)
                         showStop = false; tipInput = "0"; paymentMethod = "CASH"
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = Green)
-                ) { Text(st.saveBtn, fontWeight = FontWeight.Bold, color = Dark) }
+                    colors = ButtonDefaults.buttonColors(containerColor = tc.green)
+                ) { Text(st.saveBtn, fontWeight = FontWeight.Bold, color = tc.background) }
             },
             dismissButton = {
                 TextButton(onClick = {
                     showStop = false
                     if (!wasPaused) vm.resumeRide()
-                }) { Text(st.cancelBtn, color = Muted) }
+                }) { Text(st.cancelBtn, color = tc.muted) }
             }
         )
     }
@@ -341,101 +414,100 @@ fun ProfitPreviewCard(
     settings: AppSettings,
     allRides: List<Ride>,
     allShifts: List<Shift>,
+    allExpenses: List<TariffExpense>,
 ) {
+    val tc  = LocalThemeColors.current
     val st  = LocalStrings.current
     val sym = settings.currency.symbol
 
-    // ── Compute stats from history ───────────────────────────
-    val completedShifts = allShifts.filter { !it.isActive && it.endTime > 0 }
-    val totalHours      = completedShifts.sumOf { (it.endTime - it.startTime) / 3_600_000.0 }
-    val totalRevenue    = allRides.sumOf { it.price }
-    val totalKm         = allRides.sumOf { it.kilometers }
-    val hasEnoughData   = completedShifts.isNotEmpty() && totalHours >= 0.5 && totalRevenue > 0.0
+    // ── Stats from history ───────────────────────────────────
+    val completedShifts   = allShifts.filter { !it.isActive && it.endTime > 0 }
+    val totalHours        = completedShifts.sumOf { (it.endTime - it.startTime) / 3_600_000.0 }
+    val totalRevenue      = allRides.sumOf { it.price }
+    val totalKm           = allRides.sumOf { it.kilometers }
+    val totalRideCount    = allRides.size.toDouble()
+    val hasEnoughData     = completedShifts.isNotEmpty() && totalHours >= 0.5 && totalRevenue > 0.0
 
-    // ── 8h estimate (requires stats) ────────────────────────
+    // Averages
     val avgRevenuePerHour = if (totalHours > 0) totalRevenue / totalHours else 0.0
     val avgKmPerHour      = if (totalHours > 0) totalKm / totalHours else 0.0
-    val gross8h           = avgRevenuePerHour * 8.0
-    val fuel8h            = avgKmPerHour * 8.0 * (tariff?.fuelCostPerKm ?: 0.0)
-    val tax8h             = gross8h * (tariff?.taxPercent ?: 0.0) / 100.0
-    val net8h             = gross8h - fuel8h - tax8h
+    val avgRidesPerHour   = if (totalHours > 0) totalRideCount / totalHours else 0.0
+    // Custom expenses for this tariff
+    val tariffExpenses = if (tariff != null) allExpenses.filter { it.tariffId == tariff.id } else emptyList()
 
-    // ── Per 100 currency breakdown (always available) ───────
-    // Estimate km for 100 revenue: use stats ratio if available, else tariff's pricePerKm
-    val kmPer100 = when {
-        totalRevenue > 0 -> (totalKm / totalRevenue) * 100.0
-        (tariff?.pricePerKm ?: 0.0) > 0 -> 100.0 / tariff!!.pricePerKm
-        else -> 0.0
+    // ── Helper: cost of custom expenses for an 8h shift ─────
+    // PER_MONTH: fixed costs accrue every calendar day (÷30), not per shift
+    fun expenseCost8h(gross: Double): Double = tariffExpenses.sumOf { exp ->
+        when {
+            exp.expType == ExpenseType.PERCENT     -> gross * exp.amount / 100.0
+            exp.freq == ExpenseFrequency.PER_RIDE  -> exp.amount * (avgRidesPerHour * 8.0)
+            exp.freq == ExpenseFrequency.PER_SHIFT -> exp.amount
+            exp.freq == ExpenseFrequency.PER_MONTH -> exp.amount / 30.0
+            else -> 0.0
+        }
     }
-    val fuel100   = kmPer100 * (tariff?.fuelCostPerKm ?: 0.0)
-    val tax100    = 100.0 * (tariff?.taxPercent ?: 0.0) / 100.0
-    val net100    = 100.0 - fuel100 - tax100
+
+    // ── 8h estimate ──────────────────────────────────────────
+    val gross8h      = avgRevenuePerHour * 8.0
+    val fuel8h       = avgKmPerHour * 8.0 * (tariff?.fuelCostPerKm ?: 0.0)
+    val tax8h        = gross8h * (tariff?.taxPercent ?: 0.0) / 100.0
+    val customCost8h = expenseCost8h(gross8h)
+    val net8h        = gross8h - fuel8h - tax8h - customCost8h
 
     Card(
-        colors   = CardDefaults.cardColors(containerColor = Card),
+        colors   = CardDefaults.cardColors(containerColor = tc.card),
         shape    = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
 
-            Text(st.profitPreviewTitle, color = Color.White,
+            Text(st.profitPreviewTitle, color = tc.textPrimary,
                 fontSize = 13.sp, fontWeight = FontWeight.Bold)
 
             if (tariff == null) {
-                Text(st.profitPreviewNoTariff, color = Muted, fontSize = 12.sp)
+                Text(st.profitPreviewNoTariff, color = tc.muted, fontSize = 12.sp)
                 return@Column
             }
 
             // ── Section 1: 8h estimate ───────────────────────
-            Text(st.shift8hTitle, color = Gold,
+            Text(st.shift8hTitle, color = tc.accent,
                 fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
 
             if (!hasEnoughData) {
-                Text(st.notEnoughDataLabel, color = Muted,
+                Text(st.notEnoughDataLabel, color = tc.muted,
                     fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                Text(st.notEnoughDataSub, color = Muted, fontSize = 11.sp)
+                Text(st.notEnoughDataSub, color = tc.muted, fontSize = 11.sp)
             } else {
-                val rows8h = listOf(
-                    Triple(st.shift8hAvgPerHour, "$sym%.2f".format(avgRevenuePerHour),  Color.White),
-                    Triple(st.shift8hGross,       "+$sym%.2f".format(gross8h),           Color.White),
-                    Triple(st.fuelLabel,          "-$sym%.2f".format(fuel8h),            Red),
-                    Triple(st.taxInsurance,       "-$sym%.2f".format(tax8h),             Red),
-                    Triple(st.shift8hNet,         "+$sym%.2f".format(net8h),             Green),
-                )
+                val rows8h = buildList {
+                    add(Triple(st.shift8hAvgPerHour, "$sym%.2f".format(avgRevenuePerHour), tc.textPrimary))
+                    add(Triple(st.shift8hGross,      "+$sym%.2f".format(gross8h),          tc.textPrimary))
+                    add(Triple(st.fuelLabel,         "-$sym%.2f".format(fuel8h),           tc.red))
+                    add(Triple(st.taxInsurance,      "-$sym%.2f".format(tax8h),            tc.red))
+                    if (customCost8h > 0)
+                        add(Triple(st.customCostsRow, "-$sym%.2f".format(customCost8h),   tc.red))
+                    add(Triple(st.shift8hNet,        "+$sym%.2f".format(net8h),            tc.green))
+                }
                 PreviewRows(rows8h)
             }
-
-            HorizontalDivider(color = Color(0xFF1E2430))
-
-            // ── Section 2: Per 100 currency breakdown ────────
-            Text(st.per100GrossTitle, color = Gold,
-                fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
-
-            val rows100 = listOf(
-                Triple(st.grossRevenue, "+$sym%.2f".format(100.0),  Color.White),
-                Triple(st.fuelLabel,   "-$sym%.2f".format(fuel100), Red),
-                Triple(st.taxInsurance,"-$sym%.2f".format(tax100),  Red),
-                Triple(st.netProfit,   "+$sym%.2f".format(net100),  Green),
-            )
-            PreviewRows(rows100)
         }
     }
 }
 
 @Composable
 private fun PreviewRows(rows: List<Triple<String, String, Color>>) {
+    val tc = LocalThemeColors.current
     rows.forEachIndexed { idx, (label, value, color) ->
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment     = Alignment.CenterVertically
         ) {
-            Text(label, color = Muted, fontSize = 12.sp)
+            Text(label, color = tc.muted, fontSize = 12.sp)
             Text(value, color = color, fontSize = 12.sp,
                 fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
         }
         if (idx < rows.lastIndex)
-            HorizontalDivider(color = Color(0xFF1E2430), thickness = 0.5.dp)
+            HorizontalDivider(color = tc.surface, thickness = 0.5.dp)
     }
 }
 
@@ -447,9 +519,10 @@ fun FareAdjustCard(
     onAdjust: (Double) -> Unit,
     onReset: () -> Unit
 ) {
+    val tc = LocalThemeColors.current
     val st = LocalStrings.current
     Card(
-        colors = CardDefaults.cardColors(containerColor = Card),
+        colors = CardDefaults.cardColors(containerColor = tc.card),
         shape  = RoundedCornerShape(12.dp)
     ) {
         Column(Modifier.padding(14.dp)) {
@@ -458,11 +531,11 @@ fun FareAdjustCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment     = Alignment.CenterVertically
             ) {
-                Text(st.fareAdjTitle, color = Muted, fontSize = 10.sp,
+                Text(st.fareAdjTitle, color = tc.muted, fontSize = 10.sp,
                     letterSpacing = 1.sp, fontWeight = FontWeight.Bold)
                 if (currentAdjust != 0.0) {
                     TextButton(onClick = onReset, contentPadding = PaddingValues(4.dp)) {
-                        Text(st.resetBtn, color = Red, fontSize = 11.sp)
+                        Text(st.resetBtn, color = tc.red, fontSize = 11.sp)
                     }
                 }
             }
@@ -472,7 +545,7 @@ fun FareAdjustCard(
             if (currentAdjust != 0.0) {
                 Text(
                     "${if (currentAdjust > 0) "+" else ""}$symbol%.2f".format(currentAdjust),
-                    color      = if (currentAdjust > 0) Green else Red,
+                    color      = if (currentAdjust > 0) tc.green else tc.red,
                     fontSize   = 18.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace
@@ -486,11 +559,11 @@ fun FareAdjustCard(
                     OutlinedButton(
                         onClick  = { onAdjust(amount) },
                         modifier = Modifier.weight(1f),
-                        border   = BorderStroke(1.dp, Red),
+                        border   = BorderStroke(1.dp, tc.red),
                         shape    = RoundedCornerShape(8.dp),
                         contentPadding = PaddingValues(4.dp)
                     ) {
-                        Text("$symbol%.2f".format(amount), color = Red,
+                        Text("$symbol%.2f".format(amount), color = tc.red,
                             fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
                 }
@@ -498,18 +571,18 @@ fun FareAdjustCard(
                     OutlinedButton(
                         onClick  = { onAdjust(amount) },
                         modifier = Modifier.weight(1f),
-                        border   = BorderStroke(1.dp, Green),
+                        border   = BorderStroke(1.dp, tc.green),
                         shape    = RoundedCornerShape(8.dp),
                         contentPadding = PaddingValues(4.dp)
                     ) {
-                        Text("+$symbol%.2f".format(amount), color = Green,
+                        Text("+$symbol%.2f".format(amount), color = tc.green,
                             fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
             Spacer(Modifier.height(4.dp))
             Text(st.fareAdjHint,
-                color = Muted, fontSize = 10.sp)
+                color = tc.muted, fontSize = 10.sp)
         }
     }
 }
@@ -518,24 +591,25 @@ fun FareAdjustCard(
 
 @Composable
 fun BigPriceCard(priceFormatted: String, isWaiting: Boolean, adjustFormatted: String? = null) {
+    val tc = LocalThemeColors.current
     val st = LocalStrings.current
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors   = CardDefaults.cardColors(containerColor = Card),
+        colors   = CardDefaults.cardColors(containerColor = tc.card),
         shape    = RoundedCornerShape(16.dp)
     ) {
         Column(Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(st.currentFare, color = Muted, fontSize = 11.sp, letterSpacing = 1.sp)
-            Text(priceFormatted, color = Gold, fontSize = 52.sp,
+            Text(st.currentFare, color = tc.muted, fontSize = 11.sp, letterSpacing = 1.sp)
+            Text(priceFormatted, color = tc.accent, fontSize = 52.sp,
                 fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
             if (adjustFormatted != null) {
                 Text("${st.inclAdjustment} $adjustFormatted",
-                    color = Muted, fontSize = 10.sp)
+                    color = tc.muted, fontSize = 10.sp)
             }
             Spacer(Modifier.height(4.dp))
             Text(
                 if (isWaiting) st.statusWaiting else st.statusDriving,
-                color      = if (isWaiting) Purple else Green,
+                color      = if (isWaiting) tc.purple else tc.green,
                 fontSize   = 13.sp,
                 fontWeight = FontWeight.SemiBold
             )
@@ -546,22 +620,23 @@ fun BigPriceCard(priceFormatted: String, isWaiting: Boolean, adjustFormatted: St
 // Точка 5 — Престой в секунди/минути
 @Composable
 fun WaitCard2(waitSeconds: Double, modifier: Modifier) {
-    val st = LocalStrings.current
+    val tc       = LocalThemeColors.current
+    val st       = LocalStrings.current
     val totalSec = waitSeconds.toLong()
-    val display  = if (totalSec < 60) {
-        "${totalSec}s"
-    } else {
-        val m = totalSec / 60
-        val s = totalSec % 60
-        "%d:%02dm".format(m, s)
-    }
-    Card(modifier = modifier, colors = CardDefaults.cardColors(containerColor = Card),
+    val h        = totalSec / 3600
+    val m        = (totalSec % 3600) / 60
+    val s        = totalSec % 60
+    val display  = "%02d:%02d:%02d".format(h, m, s)
+    Card(modifier = modifier, colors = CardDefaults.cardColors(containerColor = tc.card),
         shape = RoundedCornerShape(12.dp)) {
-        Column(Modifier.padding(14.dp)) {
-            Text(st.waitLabel, color = Muted, fontSize = 10.sp, letterSpacing = 1.sp)
-            Text(display, color = Purple,
-                fontSize = 28.sp, fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
-            Text(st.secondsMin, color = Muted, fontSize = 11.sp)
+        Column(
+            Modifier.padding(14.dp).fillMaxHeight(),
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(st.waitLabel, color = tc.muted, fontSize = 10.sp, letterSpacing = 1.sp)
+            Text(display, color = tc.purple,
+                fontSize = 24.sp, fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
+            Text("чч:мм:сс", color = tc.muted, fontSize = 11.sp)
         }
     }
 }
@@ -569,29 +644,31 @@ fun WaitCard2(waitSeconds: Double, modifier: Modifier) {
 // Точка 2 — Скорост с правилна мерна единица
 @Composable
 fun SpeedCard2(speedKmh: Double, settings: AppSettings, modifier: Modifier) {
+    val tc = LocalThemeColors.current
     val st = LocalStrings.current
     val displaySpeed = if (settings.distanceUnit == DistanceUnit.MILES)
         speedKmh * 0.621371 else speedKmh
     val unit = if (settings.distanceUnit == DistanceUnit.MILES) "mph" else "km/h"
-    Card(modifier = modifier, colors = CardDefaults.cardColors(containerColor = Card),
+    Card(modifier = modifier, colors = CardDefaults.cardColors(containerColor = tc.card),
         shape = RoundedCornerShape(12.dp)) {
         Column(Modifier.padding(14.dp)) {
-            Text(st.speedLabel, color = Muted, fontSize = 10.sp, letterSpacing = 1.sp)
-            Text("%.0f".format(displaySpeed), color = Color.White,
+            Text(st.speedLabel, color = tc.muted, fontSize = 10.sp, letterSpacing = 1.sp)
+            Text("%.0f".format(displaySpeed), color = tc.textPrimary,
                 fontSize = 32.sp, fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
-            Text(unit, color = Muted, fontSize = 11.sp)
+            Text(unit, color = tc.muted, fontSize = 11.sp)
         }
     }
 }
 
 @Composable
 fun StatMini2(label: String, value: String, color: Color, modifier: Modifier) {
-    Card(modifier = modifier, colors = CardDefaults.cardColors(containerColor = Card),
+    val tc = LocalThemeColors.current
+    Card(modifier = modifier, colors = CardDefaults.cardColors(containerColor = tc.card),
         shape = RoundedCornerShape(10.dp)) {
         Row(Modifier.padding(12.dp).fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(label, color = Muted, fontSize = 10.sp, letterSpacing = 1.sp)
+            Text(label, color = tc.muted, fontSize = 10.sp, letterSpacing = 1.sp)
             Text(value, color = color, fontSize = 14.sp,
                 fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
         }
@@ -600,63 +677,67 @@ fun StatMini2(label: String, value: String, color: Color, modifier: Modifier) {
 
 @Composable
 fun GpsStartButton(onClick: () -> Unit) {
+    val tc = LocalThemeColors.current
     val st = LocalStrings.current
     Button(onClick = onClick, modifier = Modifier.fillMaxWidth().height(56.dp),
-        colors = ButtonDefaults.buttonColors(containerColor = Gold),
+        colors = ButtonDefaults.buttonColors(containerColor = tc.accent),
         shape  = RoundedCornerShape(14.dp)) {
-        Icon(Icons.Default.PlayArrow, null, tint = Dark)
+        Icon(Icons.Default.PlayArrow, null, tint = tc.background)
         Spacer(Modifier.width(8.dp))
-        Text(st.startGpsRide, color = Dark, fontWeight = FontWeight.Black, fontSize = 16.sp)
+        Text(st.startGpsRide, color = tc.background, fontWeight = FontWeight.Black, fontSize = 16.sp)
     }
 }
 
 @Composable
 fun RideControls(isPaused: Boolean, onPause: () -> Unit, onResume: () -> Unit, onStop: () -> Unit) {
+    val tc = LocalThemeColors.current
     val st = LocalStrings.current
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         OutlinedButton(
             onClick  = { if (isPaused) onResume() else onPause() },
             modifier = Modifier.weight(1f).height(52.dp),
             shape    = RoundedCornerShape(12.dp),
-            border   = BorderStroke(1.dp, Muted)
+            border   = BorderStroke(1.dp, tc.muted)
         ) {
-            Icon(if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause, null, tint = Gold)
+            Icon(if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause, null, tint = tc.accent)
             Spacer(Modifier.width(6.dp))
-            Text(if (isPaused) st.resumeBtn else st.pauseBtn, color = Gold)
+            Text(if (isPaused) st.resumeBtn else st.pauseBtn, color = tc.accent)
         }
         Button(onClick = onStop, modifier = Modifier.weight(1f).height(52.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = Red),
+            colors = ButtonDefaults.buttonColors(containerColor = tc.red),
             shape  = RoundedCornerShape(12.dp)) {
-            Icon(Icons.Default.Stop, null, tint = Color.White)
+            Icon(Icons.Default.Stop, null, tint = tc.background)
             Spacer(Modifier.width(6.dp))
-            Text(st.endBtn, color = Color.White, fontWeight = FontWeight.Bold)
+            Text(st.endBtn, color = tc.background, fontWeight = FontWeight.Bold)
         }
     }
 }
 
 @Composable
 fun InfoCard(text: String) {
-    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1A2E)),
+    val tc = LocalThemeColors.current
+    Card(colors = CardDefaults.cardColors(containerColor = tc.cardAlt),
         shape = RoundedCornerShape(12.dp)) {
         Row(Modifier.padding(14.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("ℹ️", fontSize = 16.sp)
-            Text(text, color = Muted, fontSize = 12.sp, lineHeight = 18.sp)
+            Text(text, color = tc.muted, fontSize = 12.sp, lineHeight = 18.sp)
         }
     }
 }
 
 @Composable
 fun TimerCard(seconds: Long, modifier: Modifier) {
+    val tc = LocalThemeColors.current
     val h = seconds / 3600
     val m = (seconds % 3600) / 60
     val s = seconds % 60
-    Card(modifier = modifier, colors = CardDefaults.cardColors(containerColor = Card),
+    Card(modifier = modifier, colors = CardDefaults.cardColors(containerColor = tc.card),
         shape = RoundedCornerShape(12.dp)) {
         Column(Modifier.padding(14.dp)) {
             Text(if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s),
-                color = Blue, fontSize = if (h > 0) 20.sp else 28.sp,
+                color = tc.blue, fontSize = if (h > 0) 20.sp else 28.sp,
                 fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
-            Text("hh:mm:ss", color = Muted, fontSize = 11.sp)
+            Text("hh:mm:ss", color = tc.muted, fontSize = 11.sp)
         }
     }
 }
@@ -674,14 +755,15 @@ fun TariffSelectorBar(
     currentHour: Int,
     onSelect: (Tariff?) -> Unit,
 ) {
+    val tc = LocalThemeColors.current
     val st = LocalStrings.current
     Card(
-        colors   = CardDefaults.cardColors(containerColor = Card),
+        colors   = CardDefaults.cardColors(containerColor = tc.card),
         shape    = RoundedCornerShape(14.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(Modifier.padding(14.dp)) {
-            Text(st.tariffLabel, color = Muted, fontSize = 11.sp,
+            Text(st.tariffLabel, color = tc.muted, fontSize = 11.sp,
                 letterSpacing = 1.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(10.dp))
             Row(
@@ -695,13 +777,13 @@ fun TariffSelectorBar(
                     Button(
                         onClick  = { onSelect(t) },
                         colors   = ButtonDefaults.buttonColors(
-                            containerColor = if (isSel) Gold else Color(0xFF0A0C10)
+                            containerColor = if (isSel) tc.accent else tc.cardAlt
                         ),
                         shape = RoundedCornerShape(10.dp)
                     ) {
                         Text(
                             if (isAutoActive) "⚡ ${t.name}" else t.name,
-                            color      = if (isSel) Dark else Muted,
+                            color      = if (isSel) tc.background else tc.muted,
                             fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
                             fontSize   = 13.sp
                         )
@@ -710,11 +792,36 @@ fun TariffSelectorBar(
             }
             if (selected != null) {
                 Spacer(Modifier.height(6.dp))
+                val gSettings = LocalSettings.current
+                fun eff(tariffVal: Double, globalVal: Double) =
+                    if (tariffVal > 0.0) tariffVal else globalVal
+                val effStart = eff(selected.startFee,       gSettings.startFee)
+                val effKm    = eff(selected.pricePerKm,     gSettings.pricePerKm)
+                val effMin   = eff(selected.pricePerMinute, gSettings.pricePerMinute)
+                val sym      = gSettings.currency.symbol
+                val unit     = gSettings.distanceUnit.shortLabel
                 Text(
-                    "${selected.name}:  start ${selected.startFee}  •  " +
-                    "${selected.pricePerKm}/km  •  ${selected.pricePerMinute}/min",
-                    color = Muted, fontSize = 10.sp
+                    "${selected.name}:  $sym${"%.2f".format(effStart)} start  •  $sym${"%.2f".format(effKm)}/$unit  •  $sym${"%.2f".format(effMin)}/min",
+                    color = tc.muted, fontSize = 10.sp
                 )
+                if (effKm == 0.0) {
+                    Spacer(Modifier.height(4.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Warning, null,
+                            tint     = tc.red,
+                            modifier = Modifier.size(12.dp)
+                        )
+                        Text(
+                            "Цена/км не е настроена — приходът от км ще е 0",
+                            color    = tc.red,
+                            fontSize = 10.sp,
+                        )
+                    }
+                }
             }
         }
     }
@@ -722,12 +829,21 @@ fun TariffSelectorBar(
 
 // ── Shift banner ─────────────────────────────────────────────
 @Composable
-fun ShiftBanner(activeShift: Shift?, onStart: () -> Unit, onEnd: () -> Unit) {
+fun ShiftBanner(
+    activeShift   : Shift?,
+    isShiftPaused : Boolean = false,
+    shiftPausedMs : Long    = 0L,
+    onStart  : () -> Unit,
+    onEnd    : () -> Unit,
+    onPause  : () -> Unit = {},
+    onResume : () -> Unit = {},
+) {
+    val tc = LocalThemeColors.current
     val st = LocalStrings.current
     if (activeShift == null) {
         Card(
             modifier = Modifier.fillMaxWidth(),
-            colors   = CardDefaults.cardColors(containerColor = Gold.copy(alpha = 0.12f)),
+            colors   = CardDefaults.cardColors(containerColor = tc.accent.copy(alpha = 0.12f)),
             shape    = RoundedCornerShape(14.dp),
         ) {
             Column(
@@ -735,29 +851,41 @@ fun ShiftBanner(activeShift: Shift?, onStart: () -> Unit, onEnd: () -> Unit) {
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text(st.shiftNoneTitle, color = Color.White,
+                Text(st.shiftNoneTitle, color = tc.textPrimary,
                     fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                Text(st.shiftNoneWarning, color = Muted,
+                Text(st.shiftNoneWarning, color = tc.muted,
                     fontSize = 12.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                     lineHeight = 17.sp)
                 Spacer(Modifier.height(4.dp))
                 Button(
                     onClick  = onStart,
                     modifier = Modifier.fillMaxWidth(),
-                    colors   = ButtonDefaults.buttonColors(containerColor = Gold),
+                    colors   = ButtonDefaults.buttonColors(containerColor = tc.accent),
                     shape    = RoundedCornerShape(10.dp),
                 ) {
-                    Icon(Icons.Default.PlayArrow, null, tint = Dark, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Default.PlayArrow, null, tint = tc.background, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text(st.shiftStartBtn, color = Dark, fontWeight = FontWeight.Bold)
+                    Text(st.shiftStartBtn, color = tc.background, fontWeight = FontWeight.Bold)
                 }
             }
         }
     } else {
+        val amber = androidx.compose.ui.graphics.Color(0xFFFFA726)
+        val dotColor  = if (isShiftPaused) amber else tc.green
+        val cardColor = if (isShiftPaused) amber.copy(alpha = 0.1f) else tc.green.copy(alpha = 0.1f)
+
         var elapsed by remember { mutableLongStateOf(0L) }
-        LaunchedEffect(activeShift.startTime) {
+        // Capture pause-start wall-clock time so the timer freezes while paused
+        val pauseStartRef = remember { mutableLongStateOf(0L) }
+        LaunchedEffect(isShiftPaused) {
+            pauseStartRef.longValue = if (isShiftPaused) System.currentTimeMillis() else 0L
+        }
+        LaunchedEffect(activeShift.startTime, isShiftPaused) {
             while (true) {
-                elapsed = (System.currentTimeMillis() - activeShift.startTime) / 1000L
+                val now = System.currentTimeMillis()
+                val currentPauseDur = if (isShiftPaused && pauseStartRef.longValue > 0L)
+                    now - pauseStartRef.longValue else 0L
+                elapsed = maxOf(0L, (now - activeShift.startTime - shiftPausedMs - currentPauseDur) / 1000L)
                 delay(1000L)
             }
         }
@@ -767,7 +895,7 @@ fun ShiftBanner(activeShift: Shift?, onStart: () -> Unit, onEnd: () -> Unit) {
 
         Card(
             modifier = Modifier.fillMaxWidth(),
-            colors   = CardDefaults.cardColors(containerColor = Green.copy(alpha = 0.1f)),
+            colors   = CardDefaults.cardColors(containerColor = cardColor),
             shape    = RoundedCornerShape(14.dp),
         ) {
             Row(
@@ -776,24 +904,46 @@ fun ShiftBanner(activeShift: Shift?, onStart: () -> Unit, onEnd: () -> Unit) {
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Box(Modifier.size(10.dp).background(Green, RoundedCornerShape(5.dp)))
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Box(Modifier.size(10.dp).background(dotColor, RoundedCornerShape(5.dp)))
                     Column {
                         Text(st.shiftActiveLabel.format(activeShift.shiftNumber),
-                            color = Green, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                        Text(dur, color = Muted, fontSize = 11.sp)
+                            color = dotColor, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (isShiftPaused) "${st.pausedLabel}  •  $dur" else dur,
+                            color = tc.muted, fontSize = 11.sp
+                        )
                     }
                 }
-                OutlinedButton(
-                    onClick = onEnd,
-                    colors  = ButtonDefaults.outlinedButtonColors(contentColor = Red),
-                    border  = androidx.compose.foundation.BorderStroke(1.dp, Red.copy(alpha = 0.6f)),
-                    shape   = RoundedCornerShape(10.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                ) {
-                    Icon(Icons.Default.Stop, null, tint = Red, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(5.dp))
-                    Text(st.shiftEndBtn, color = Red, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    // Pause / Resume button
+                    OutlinedButton(
+                        onClick = if (isShiftPaused) onResume else onPause,
+                        colors  = ButtonDefaults.outlinedButtonColors(contentColor = amber),
+                        border  = androidx.compose.foundation.BorderStroke(1.dp, amber.copy(alpha = 0.7f)),
+                        shape   = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                    ) {
+                        if (isShiftPaused) {
+                            Icon(Icons.Default.PlayArrow, null, tint = amber, modifier = Modifier.size(16.dp))
+                        } else {
+                            Icon(Icons.Default.Pause, null, tint = amber, modifier = Modifier.size(16.dp))
+                        }
+                    }
+                    // End button
+                    OutlinedButton(
+                        onClick = onEnd,
+                        colors  = ButtonDefaults.outlinedButtonColors(contentColor = tc.red),
+                        border  = androidx.compose.foundation.BorderStroke(1.dp, tc.red.copy(alpha = 0.6f)),
+                        shape   = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    ) {
+                        Icon(Icons.Default.Stop, null, tint = tc.red, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text(st.shiftEndBtn, color = tc.red, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
                 }
             }
         }

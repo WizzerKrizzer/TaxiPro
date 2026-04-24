@@ -11,48 +11,103 @@ import androidx.compose.ui.*
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
+import java.text.SimpleDateFormat
+import com.taxipro.data.db.ExpenseFrequency
+import com.taxipro.data.db.ExpenseType
 import com.taxipro.data.db.Ride
+import com.taxipro.data.db.Shift
+import com.taxipro.data.db.TariffExpense
+import com.taxipro.data.db.expType
+import com.taxipro.data.db.findZone
+import com.taxipro.data.db.freq
 import com.taxipro.data.db.formatPrice
+import com.taxipro.data.db.rideEndLatLng
+import com.taxipro.data.db.rideStartLatLng
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
+import com.taxipro.data.db.SettingsRepository
+import kotlinx.coroutines.launch
 import com.taxipro.ui.theme.LocalStrings
 import com.taxipro.ui.theme.LocalSettings
 import com.taxipro.ui.viewmodel.RideViewModel
-import java.text.SimpleDateFormat
 import java.util.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun StatsScreen(vm: RideViewModel) {
-    val allRides by vm.allRides.collectAsState(initial = emptyList())
-    val st       = LocalStrings.current
-    val settings = LocalSettings.current
+fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
+    val tc          = LocalThemeColors.current
+    val allRides    by vm.allRides.collectAsState(initial = emptyList())
+    val allShifts   by vm.allShifts.collectAsState(initial = emptyList())
+    val allExpenses by vm.allExpenses.collectAsState(initial = emptyList())
+    val allZones    by vm.allZones.collectAsState(initial = emptyList())
+    val st          = LocalStrings.current
+    val settings    = LocalSettings.current
 
-    var period         by remember { mutableStateOf("week") }
-    var customStart    by remember { mutableStateOf<Long?>(null) }
-    var customEnd      by remember { mutableStateOf<Long?>(null) }
-    var showDatePicker by remember { mutableStateOf(false) }
-    var trendTab       by remember { mutableIntStateOf(0) }   // 0=dow, 1=hour, 2=month
-    val dateRangeState = rememberDateRangePickerState()
-    val sdfDate        = SimpleDateFormat("dd.MM", Locale.getDefault())
+    // ── Trend state ───────────────────────────────────────────
+    var trendMode    by remember { mutableStateOf(TrendMode.DAY) }
+    var trendOffset  by remember { mutableIntStateOf(0) }
+    var trendSortByValue by remember { mutableStateOf(false) }
+    val nowMs        = remember { System.currentTimeMillis() }
+    val initWeek     = remember { pfCurrentWeekRange() }
+    var filterFromMs by remember { mutableStateOf<Long?>(initWeek.first) }
+    var filterToMs   by remember { mutableStateOf<Long?>(initWeek.second) }
 
     val now   = System.currentTimeMillis()
     val dayMs = 86_400_000L
-    val filtered = when {
-        period == "custom" && customStart != null && customEnd != null ->
-            allRides.filter { it.startTime in customStart!!..customEnd!! }
-        period == "today"  -> allRides.filter { it.date >= startOfDay(now) }
-        period == "week"   -> allRides.filter { it.startTime >= now - 7 * dayMs }
-        period == "month"  -> allRides.filter { it.startTime >= now - 30 * dayMs }
-        else               -> allRides
+
+    // When the midnight-to-shift-day setting is ON, rides between 00:00–03:59
+    // are treated as belonging to the previous calendar day (4-hour logical shift).
+    val midnightShiftMs = if (settings.countMidnightRidesToShiftDay) 4 * 3_600_000L else 0L
+    fun Ride.logicalTime(): Long {
+        if (midnightShiftMs == 0L) return startTime
+        val hour = Calendar.getInstance().apply { timeInMillis = startTime }
+            .get(Calendar.HOUR_OF_DAY)
+        return if (hour < 4) startTime - midnightShiftMs else startTime
+    }
+    // "Today" start: if it's currently before 04:00, today's logical day started yesterday
+    val effectiveTodayStart = run {
+        val currentHour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+        val base = if (settings.countMidnightRidesToShiftDay && currentHour < 4)
+            startOfDay(now - dayMs) else startOfDay(now)
+        base
     }
 
-    val total      = filtered.sumOf { it.price }
-    val totalKm    = filtered.sumOf { it.kilometers }
-    val totalWait  = filtered.sumOf { it.waitMinutes }
+    val filtered = if (filterFromMs != null && filterToMs != null)
+        allRides.filter { it.logicalTime() in filterFromMs!!..filterToMs!! }
+    else
+        allRides
+
     val totalTip   = filtered.sumOf { it.tip }
+    val total      = filtered.sumOf { it.price } + totalTip   // gross incl. tips
+    val totalKm    = filtered.sumOf { it.kilometers }          // client km only
+    val totalWait  = filtered.sumOf { it.waitMinutes }
     val avgPerRide = if (filtered.isNotEmpty()) total / filtered.size else 0.0
     val avgPerKm   = if (totalKm > 0) total / totalKm else 0.0
-    val netProfit  = total * 0.85
+
+    // Total km including dead miles: sum shift.totalKm for shifts in filtered set
+    val filteredShiftIds = filtered.map { it.shiftId }.filter { it > 0L }.toSet()
+    val shiftKmMap       = allShifts.associate { it.id to it.totalKm }
+    val totalShiftKm     = run {
+        val fromShifts = filteredShiftIds.sumOf { id -> shiftKmMap[id] ?: 0.0 }
+        // Rides without a shiftId contribute their client km as best estimate
+        val noShiftKm  = filtered.filter { it.shiftId <= 0L }.sumOf { it.kilometers }
+        // Calculator rides saved inside a shift (startTime == endTime, set by saveCalculatedRide)
+        // are not tracked by GPS, so their km is absent from shift.totalKm — add them separately.
+        val calcInShift = filtered
+            .filter { it.shiftId > 0L && it.startTime == it.endTime }
+            .sumOf { it.kilometers }
+        fromShifts + noShiftKm + calcInShift
+    }
+    val netProfit  = filtered.sumOf { ride ->
+        val tax     = ride.price * ride.taxPercent / 100.0
+        // Only GPS-measured km go toward fuel; adjustment km are not real distance driven
+        val gpsKm   = ride.kilometers - ride.adjustmentKm
+        val fuel    = gpsKm * ride.fuelCostPerKm
+        ride.price + ride.tip - tax - fuel
+    }
 
     // Разпределение по час
     val hourMap = mutableMapOf<Int, Int>()
@@ -63,36 +118,59 @@ fun StatsScreen(vm: RideViewModel) {
     }
     val peakHour = hourMap.maxByOrNull { it.value }?.key ?: 0
 
-    // Топ маршрути
+    // Най-чести маршрути по зони
+    val outsideLabel = st.zones.outsideZones
     val routeMap = mutableMapOf<String, Pair<Int, Double>>()
     filtered.forEach { ride ->
-        val key = "${ride.fromAddress.take(10)} → ${ride.toAddress.take(10)}"
-            .ifEmpty { "${st.ridePrefix}${ride.globalId}" }
+        val startCoords = rideStartLatLng(ride)
+        val endCoords   = rideEndLatLng(ride)
+        // Skip rides with no GPS data — can't assign zones
+        if (startCoords == null && endCoords == null) return@forEach
+        val (sLat, sLng) = startCoords ?: (0.0 to 0.0)
+        val (eLat, eLng) = endCoords   ?: (0.0 to 0.0)
+        val fromZone = findZone(sLat, sLng, allZones)
+        val toZone   = findZone(eLat, eLng, allZones)
+        val fromLabel = fromZone?.name ?: if (startCoords != null) outsideLabel else outsideLabel
+        val toLabel   = toZone?.name   ?: if (endCoords   != null) outsideLabel else outsideLabel
+        val key = "$fromLabel → $toLabel"
         val cur = routeMap[key] ?: Pair(0, 0.0)
         routeMap[key] = Pair(cur.first + 1, cur.second + ride.price)
     }
     val topRoutes = routeMap.entries.sortedByDescending { it.value.first }.take(5)
 
-    // ── Trend data ────────────────────────────────────────────
+    // ── KPI-table trend data (uses global filtered set) ──────────
     val dayLabels   = st.dayLabels
     val monthLabels = st.monthLabels
-    val earnByDow   = DoubleArray(7)
-    val countByDow  = IntArray(7)
     val earnByHour  = DoubleArray(24)
-    val earnByMonth = DoubleArray(12)
+    val earnByDow   = DoubleArray(7)
     filtered.forEach { ride ->
-        val c     = Calendar.getInstance().apply { timeInMillis = ride.startTime }
-        val dow   = (c.get(Calendar.DAY_OF_WEEK) - Calendar.MONDAY + 7) % 7
-        val hour  = c.get(Calendar.HOUR_OF_DAY)
-        val month = c.get(Calendar.MONTH)
-        earnByDow[dow]    += ride.price;  countByDow[dow]++
-        earnByHour[hour]  += ride.price
-        earnByMonth[month]+= ride.price
+        val tipAdd  = if (settings.includeTipsInTotal) ride.tip else 0.0
+        val rev     = ride.price + tipAdd
+        val cLogical = Calendar.getInstance().apply { timeInMillis = ride.logicalTime() }
+        val dow      = (cLogical.get(Calendar.DAY_OF_WEEK) - Calendar.MONDAY + 7) % 7
+        val hour     = Calendar.getInstance().apply { timeInMillis = ride.startTime }.get(Calendar.HOUR_OF_DAY)
+        earnByDow[dow]   += rev
+        earnByHour[hour] += rev
     }
     val bestDow  = earnByDow.indices.maxByOrNull  { earnByDow[it]  } ?: 0
     val bestHour = earnByHour.indices.maxByOrNull { earnByHour[it] } ?: 0
 
-    val totalWorkMs  = filtered.sumOf { (it.endTime - it.startTime).coerceAtLeast(0L) }
+    // Use full shift span (first ride start → last ride end per shift) so that
+    // idle time between rides is included — gives accurate "revenue per hour worked".
+    val totalWorkMs = run {
+        val withShift = filtered.filter { it.shiftId > 0L }
+        val noShift   = filtered.filter { it.shiftId <= 0L }
+        val shiftMs = withShift
+            .groupBy { it.shiftId }
+            .values
+            .sumOf { rides ->
+                val s = rides.minOf { it.startTime }
+                val e = rides.maxOf { it.endTime }
+                (e - s).coerceAtLeast(0L)
+            }
+        val noShiftMs = noShift.sumOf { (it.endTime - it.startTime).coerceAtLeast(0L) }
+        shiftMs + noShiftMs
+    }
     val totalWorkH   = totalWorkMs / 3_600_000.0
     val avgPerHour   = if (totalWorkH > 0.05) total / totalWorkH else 0.0
     val totalWorkStr = run {
@@ -103,126 +181,118 @@ fun StatsScreen(vm: RideViewModel) {
     val uniqueShifts = filtered.map { it.shiftId }.filter { it > 0L }.toSet().size
     val avgPerShift  = if (uniqueShifts > 0) total / uniqueShifts else avgPerRide
 
+    // ── Goal state ────────────────────────────────────────────
+    val scope = rememberCoroutineScope()
+    var showGoalDialog  by remember { mutableStateOf(false) }
+    var goalInput       by remember { mutableStateOf("") }
+    var activePeriod    by remember { mutableStateOf(ActivePeriod.WEEK) }
+
+    // Auto-switch trend to DoW view when month period is selected
+    LaunchedEffect(activePeriod) {
+        if (activePeriod == ActivePeriod.MONTH) trendMode = TrendMode.DAY
+    }
+
+    val weeklyGoal  = settings.weeklyGoal
+    val monthlyGoal = weeklyGoal * 4.33
+
+    // Revenue for whatever range is currently selected in the filter
+    val goalRevenue = remember(allRides, filterFromMs, filterToMs, settings.includeTipsInTotal) {
+        val from = filterFromMs ?: return@remember 0.0
+        val to   = filterToMs   ?: return@remember 0.0
+        allRides.filter { it.startTime in from..to }
+            .sumOf { it.price + if (settings.includeTipsInTotal) it.tip else 0.0 }
+    }
+
+    val showGoalCard = weeklyGoal > 0 &&
+        (activePeriod == ActivePeriod.WEEK || activePeriod == ActivePeriod.MONTH)
+    val currentGoal  = if (activePeriod == ActivePeriod.MONTH) monthlyGoal else weeklyGoal
+    val goalLabel    = if (activePeriod == ActivePeriod.MONTH) st.goal.monthlyGoalLabel else st.goal.weeklyGoalLabel
+    val goalProgress = if (currentGoal > 0) (goalRevenue / currentGoal).coerceIn(0.0, 1.0) else 0.0
+    val daysRemaining = run {
+        val endMs = filterToMs ?: (pfCurrentWeekRange().second)
+        val msLeft = (endMs - System.currentTimeMillis()).coerceAtLeast(0L)
+        ((msLeft / 86_400_000L) + 1).toInt().coerceAtMost(if (activePeriod == ActivePeriod.MONTH) 31 else 7)
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Dark)
+            .background(tc.background)
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text(st.statistics, color = Color.White,
+        Text(st.statistics, color = tc.textPrimary,
             fontSize = 22.sp, fontWeight = FontWeight.Bold)
 
         // ── Period filter ──
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            listOf(
-                "today" to st.todayLabel,
-                "week"  to st.weekLabel,
-                "month" to st.monthLabel,
-                "all"   to st.allLabel
-            ).forEach { (k, l) ->
-                val sel = period == k
-                Button(
-                    onClick = { period = k; customStart = null; customEnd = null },
-                    modifier = Modifier.weight(1f),
-                    colors   = ButtonDefaults.buttonColors(
-                        containerColor = if (sel) Gold else Color(0xFF161A22)
-                    ),
-                    contentPadding = PaddingValues(4.dp),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Text(l, color = if (sel) Dark else Muted,
-                        fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                }
-            }
-        }
-        Spacer(Modifier.height(6.dp))
-        // Date range row
-        Row(
-            Modifier.fillMaxWidth(),
-            verticalAlignment     = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            if (period == "custom" && customStart != null && customEnd != null) {
-                AssistChip(
-                    onClick = { showDatePicker = true },
-                    label   = {
-                        Text(
-                            "${sdfDate.format(java.util.Date(customStart!!))} – ${sdfDate.format(java.util.Date(customEnd!!))}",
-                            fontSize = 12.sp, color = Gold
-                        )
-                    },
-                    leadingIcon = { Icon(Icons.Default.DateRange, null, tint = Gold, modifier = Modifier.size(16.dp)) },
-                    colors      = AssistChipDefaults.assistChipColors(containerColor = Gold.copy(alpha = 0.15f)),
-                    border      = AssistChipDefaults.assistChipBorder(enabled = true, borderColor = Gold.copy(alpha = 0.4f))
-                )
-                IconButton(
-                    onClick  = { period = "week"; customStart = null; customEnd = null },
-                    modifier = Modifier.size(32.dp)
-                ) {
-                    Icon(Icons.Default.Close, null, tint = Muted, modifier = Modifier.size(18.dp))
-                }
-            } else {
-                OutlinedButton(
-                    onClick = { showDatePicker = true },
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                    border  = androidx.compose.foundation.BorderStroke(1.dp, Muted.copy(alpha = 0.4f)),
-                    shape   = RoundedCornerShape(8.dp),
-                ) {
-                    Icon(Icons.Default.DateRange, null, tint = Muted, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(st.choosePeriod, color = Muted, fontSize = 12.sp)
-                }
-            }
-        }
+        PeriodFilterRow(
+            onRangeChanged  = { f, t -> filterFromMs = f; filterToMs = t },
+            onPeriodChanged = { activePeriod = it },
+        )
 
-        // Date range picker dialog
-        if (showDatePicker) {
-            DatePickerDialog(
-                onDismissRequest = { showDatePicker = false },
-                confirmButton    = {
-                    TextButton(onClick = {
-                        val s = dateRangeState.selectedStartDateMillis
-                        val e = dateRangeState.selectedEndDateMillis
-                        if (s != null) {
-                            customStart = s
-                            customEnd   = (e ?: s) + 86_400_000L - 1L
-                            period      = "custom"
-                        }
-                        showDatePicker = false
-                    }) { Text("OK", color = Gold) }
+        // ── Goal card (WEEK or MONTH only) ───────────────────
+        if (showGoalCard || (weeklyGoal == 0.0 && (activePeriod == ActivePeriod.WEEK || activePeriod == ActivePeriod.MONTH))) {
+            Card(
+                onClick = {
+                    goalInput      = if (weeklyGoal > 0) "%.0f".format(weeklyGoal) else ""
+                    showGoalDialog = true
                 },
-                dismissButton = {
-                    TextButton(onClick = { showDatePicker = false }) {
-                        Text(st.cancelBtn, color = Muted)
-                    }
-                },
-                colors = DatePickerDefaults.colors(containerColor = Color(0xFF1A1E28))
+                modifier = Modifier.fillMaxWidth(),
+                colors   = CardDefaults.cardColors(
+                    containerColor = if (goalProgress >= 1.0) tc.green.copy(alpha = 0.12f) else tc.card
+                ),
+                shape = RoundedCornerShape(14.dp),
             ) {
-                DateRangePicker(
-                    state    = dateRangeState,
-                    modifier = Modifier.weight(1f, fill = false),
-                    colors   = DatePickerDefaults.colors(
-                        containerColor                    = Color(0xFF1A1E28),
-                        titleContentColor                 = Muted,
-                        headlineContentColor              = Color.White,
-                        weekdayContentColor               = Muted,
-                        subheadContentColor               = Muted,
-                        navigationContentColor            = Color.White,
-                        yearContentColor                  = Color.White,
-                        currentYearContentColor           = Gold,
-                        selectedYearContentColor          = Dark,
-                        selectedYearContainerColor        = Gold,
-                        dayContentColor                   = Color.White,
-                        selectedDayContentColor           = Dark,
-                        selectedDayContainerColor         = Gold,
-                        todayContentColor                 = Gold,
-                        todayDateBorderColor              = Gold,
-                        dayInSelectionRangeContentColor   = Dark,
-                        dayInSelectionRangeContainerColor = Gold.copy(alpha = 0.4f),
-                    )
-                )
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment     = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "🎯  $goalLabel",
+                            color      = if (goalProgress >= 1.0) tc.green else tc.textPrimary,
+                            fontSize   = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        if (weeklyGoal > 0) {
+                            Text(
+                                "${settings.formatPrice(goalRevenue)} / ${settings.formatPrice(currentGoal)}",
+                                color      = if (goalProgress >= 1.0) tc.green else tc.accent,
+                                fontSize   = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                        }
+                    }
+                    if (weeklyGoal > 0) {
+                        Spacer(Modifier.height(8.dp))
+                        LinearProgressIndicator(
+                            progress  = { goalProgress.toFloat() },
+                            modifier  = Modifier.fillMaxWidth().height(6.dp),
+                            color     = if (goalProgress >= 1.0) tc.green else tc.accent,
+                            trackColor = tc.surface,
+                            strokeCap = androidx.compose.ui.graphics.StrokeCap.Round,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        if (goalProgress >= 1.0) {
+                            Text(st.goal.goalReached, color = tc.green, fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold)
+                        } else {
+                            val remaining = currentGoal - goalRevenue
+                            Text(
+                                "${settings.formatPrice(remaining)} ${st.goal.remaining}  •  " +
+                                "${st.goal.daysLeft.format(daysRemaining)} ${st.goal.daysSuffix}",
+                                color    = tc.muted,
+                                fontSize = 11.sp,
+                            )
+                        }
+                    } else {
+                        Spacer(Modifier.height(4.dp))
+                        Text(st.goal.tapToSetGoal, color = tc.muted, fontSize = 12.sp)
+                    }
+                }
             }
         }
 
@@ -234,148 +304,454 @@ fun StatsScreen(vm: RideViewModel) {
         // ── Summary cards ──
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             StatCard2(st.totalRevenue, settings.formatPrice(total),
-                "${filtered.size} ${st.ridesLabel}", Gold, Modifier.weight(1f))
+                "${filtered.size} ${st.ridesLabel}", tc.accent, Modifier.weight(1f))
             StatCard2(st.netProfit, settings.formatPrice(netProfit),
-                st.afterCosts, Green, Modifier.weight(1f))
+                st.afterCosts, tc.green, Modifier.weight(1f))
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            StatCard2(st.totalKm, "%.1f km".format(totalKm),
-                st.traveled, Blue, Modifier.weight(1f))
+            StatCard2(
+                st.totalKm,
+                "%.1f km".format(if (totalShiftKm > totalKm + 0.05) totalShiftKm else totalKm),
+                if (totalShiftKm > totalKm + 0.05)
+                    "%.1f km ${st.withClients}".format(totalKm)
+                else st.traveled,
+                tc.blue, Modifier.weight(1f)
+            )
             StatCard2(st.avgRide, settings.formatPrice(avgPerRide),
-                st.perRide, Purple, Modifier.weight(1f))
+                st.perRide, tc.purple, Modifier.weight(1f))
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             StatCard2(st.avgPerHour, if (avgPerHour > 0) settings.formatPrice(avgPerHour) else "–",
                 st.revenuePerHour, Color(0xFFFF9A3C), Modifier.weight(1f))
             StatCard2(st.avgShift, if (uniqueShifts > 0) settings.formatPrice(avgPerShift) else "–",
-                if (uniqueShifts > 0) "$uniqueShifts ${st.shiftsLabel}" else st.noShiftSub, Green, Modifier.weight(1f))
+                if (uniqueShifts > 0) "$uniqueShifts ${st.shiftsLabel}" else st.noShiftSub, tc.green, Modifier.weight(1f))
         }
 
         // ── Тенденции ─────────────────────────────────────────
         StatsSection(st.trendsTitle) {
-            // Tab selector
+            // Compute period label for navigation header
+            val sdfNav  = remember { SimpleDateFormat("d MMM", Locale.getDefault()) }
+            val sdfMon  = remember { SimpleDateFormat("MMMM yyyy", Locale.getDefault()) }
+            val nowCal  = remember { Calendar.getInstance() }
+            val curDow  = remember { (nowCal.get(Calendar.DAY_OF_WEEK) - Calendar.MONDAY + 7) % 7 }
+            val curMon  = remember { nowCal.get(Calendar.MONTH) }
+            val curYear = remember { nowCal.get(Calendar.YEAR) }
+
+            val periodLabel = remember(trendMode, trendOffset) {
+                when (trendMode) {
+                    TrendMode.DAY -> {
+                        val c = Calendar.getInstance()
+                        c.set(Calendar.HOUR_OF_DAY, 0); c.set(Calendar.MINUTE, 0)
+                        c.set(Calendar.SECOND, 0);      c.set(Calendar.MILLISECOND, 0)
+                        c.add(Calendar.DAY_OF_MONTH, -(c.get(Calendar.DAY_OF_WEEK) - Calendar.MONDAY + 7) % 7)
+                        c.add(Calendar.DAY_OF_MONTH, trendOffset * 7)
+                        val monMs = c.timeInMillis
+                        val sunMs = monMs + 6 * 86_400_000L
+                        "${sdfNav.format(Date(monMs))} – ${sdfNav.format(Date(sunMs))}"
+                    }
+                    TrendMode.WEEK -> {
+                        val c = Calendar.getInstance()
+                        c.add(Calendar.MONTH, trendOffset)
+                        sdfMon.format(c.time).replaceFirstChar { it.uppercase() }
+                    }
+                    TrendMode.MONTH -> "${curYear + trendOffset}"
+                    TrendMode.YEAR, TrendMode.HOUR -> ""
+                }
+            }
+
+            // ── Dropdown mode selector ────────────────────────
+            var showModeMenu by remember { mutableStateOf(false) }
+            val modeOptions = listOf(
+                TrendMode.DAY   to st.byDay,
+                TrendMode.WEEK  to st.byWeek,
+                TrendMode.MONTH to st.byMonth,
+                TrendMode.YEAR  to st.byYear,
+                TrendMode.HOUR  to st.byHour,
+            )
+            val currentModeLabel = modeOptions.first { it.first == trendMode }.second
+
             Row(
-                Modifier
-                    .fillMaxWidth()
-                    .background(Dark, RoundedCornerShape(8.dp))
-                    .padding(4.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment     = Alignment.CenterVertically,
             ) {
-                listOf(st.byDay, st.byHour, st.byMonth).forEachIndexed { i, label ->
-                    val sel = trendTab == i
-                    Box(
-                        Modifier
-                            .weight(1f)
-                            .background(
-                                if (sel) Gold.copy(alpha = 0.2f) else Color.Transparent,
-                                RoundedCornerShape(6.dp)
-                            )
-                            .clickable { trendTab = i }
-                            .padding(vertical = 6.dp),
-                        contentAlignment = Alignment.Center
+                // Dropdown trigger
+                Box {
+                    OutlinedButton(
+                        onClick = { showModeMenu = true },
+                        shape  = RoundedCornerShape(8.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, tc.accent.copy(alpha = 0.5f)),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                     ) {
-                        Text(label,
-                            color = if (sel) Gold else Muted,
-                            fontSize = 12.sp,
-                            fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal)
+                        Text(currentModeLabel, color = tc.accent, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.width(4.dp))
+                        Icon(Icons.Default.ArrowDropDown, null, tint = tc.accent, modifier = Modifier.size(16.dp))
+                    }
+                    DropdownMenu(
+                        expanded = showModeMenu,
+                        onDismissRequest = { showModeMenu = false },
+                        containerColor = tc.card,
+                    ) {
+                        modeOptions.forEach { (mode, label) ->
+                            DropdownMenuItem(
+                                text = { Text(label, color = if (mode == trendMode) tc.accent else tc.textPrimary, fontSize = 13.sp) },
+                                onClick = {
+                                    if (mode != trendMode) { trendMode = mode; trendOffset = 0 }
+                                    showModeMenu = false
+                                },
+                                leadingIcon = if (mode == trendMode) ({
+                                    Icon(Icons.Default.Check, null, tint = tc.accent, modifier = Modifier.size(14.dp))
+                                }) else null,
+                            )
+                        }
+                    }
+                }
+
+                // Sort toggle
+                if (trendMode != TrendMode.HOUR) {
+                    IconButton(onClick = { trendSortByValue = !trendSortByValue }, modifier = Modifier.size(36.dp)) {
+                        Icon(
+                            if (trendSortByValue) Icons.Default.SortByAlpha else Icons.Default.Sort,
+                            contentDescription = if (trendSortByValue) st.trendSortByValue else st.trendSortChronological,
+                            tint = if (trendSortByValue) tc.accent else tc.muted,
+                            modifier = Modifier.size(18.dp),
+                        )
                     }
                 }
             }
-            Spacer(Modifier.height(14.dp))
 
-            when (trendTab) {
-                0 -> {
-                    Text(st.revenueByDow, color = Muted, fontSize = 11.sp)
-                    Spacer(Modifier.height(6.dp))
-                    BarChart(
-                        data  = dayLabels.mapIndexed { i, l -> l to earnByDow[i] },
-                        color = Gold, highlightIndex = bestDow
+            // ── Navigation arrows (not for YEAR/HOUR/MONTH-period) ───
+            if (trendMode != TrendMode.YEAR && trendMode != TrendMode.HOUR && activePeriod != ActivePeriod.MONTH) {
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment     = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = { trendOffset-- }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.ChevronLeft, null, tint = tc.accent, modifier = Modifier.size(20.dp))
+                    }
+                    Text(
+                        periodLabel,
+                        color      = tc.textPrimary,
+                        fontSize   = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        textAlign  = TextAlign.Center,
+                        modifier   = Modifier.weight(1f),
                     )
-                    Spacer(Modifier.height(12.dp))
-                    Text(st.rideCountByDay, color = Muted, fontSize = 11.sp)
+                    IconButton(
+                        onClick  = { if (trendOffset < 0) trendOffset++ },
+                        enabled  = trendOffset < 0,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(Icons.Default.ChevronRight, null,
+                            tint = if (trendOffset < 0) tc.accent else tc.muted,
+                            modifier = Modifier.size(20.dp))
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            // ── Legend ────────────────────────────────────────
+            if (trendMode != TrendMode.HOUR) {
+                val revenueLabel = if (settings.includeTipsInTotal)
+                    "${st.grossRevenue} (${st.totalTips.lowercase()})" else st.grossRevenue
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment     = Alignment.CenterVertically,
+                ) {
+                    LegendDot(color = tc.accent, label = revenueLabel)
+                    LegendDot(color = tc.muted,  label = settings.distanceUnit.shortLabel)
+                    LegendDot(color = Color.White.copy(alpha = 0.5f), label = st.rideCount)
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+
+            // ── Chart data per mode ───────────────────────────
+            when (trendMode) {
+
+                // ── By day ────────────────────────────────────
+                TrendMode.DAY -> key(activePeriod == ActivePeriod.MONTH) {
+                  if (activePeriod == ActivePeriod.MONTH) {
+                    // DoW aggregation: sum all Mondays, Tuesdays, etc. in the filtered month
+                    val (dowRev, dowKm, dowCnt) = remember(allRides, filterFromMs, filterToMs, settings.includeTipsInTotal) {
+                        val rev = DoubleArray(7); val km = DoubleArray(7); val cnt = IntArray(7)
+                        val from = filterFromMs ?: Long.MIN_VALUE
+                        val to   = filterToMs   ?: Long.MAX_VALUE
+                        allRides.forEach { ride ->
+                            if (ride.logicalTime() !in from..to) return@forEach
+                            val dow = Calendar.getInstance().apply { timeInMillis = ride.logicalTime() }
+                                .get(Calendar.DAY_OF_WEEK)
+                            val idx = (dow - Calendar.MONDAY + 7) % 7  // Mon=0 .. Sun=6
+                            rev[idx] += ride.price + if (settings.includeTipsInTotal) ride.tip else 0.0
+                            km[idx]  += ride.kilometers
+                            cnt[idx]++
+                        }
+                        Triple(rev, km, cnt)
+                    }
+                    val indices = if (trendSortByValue)
+                        (0..6).sortedByDescending { dowRev[it] }
+                    else (0..6).toList()
+
+                    Text(st.revenueByDow, color = tc.muted, fontSize = 11.sp)
                     Spacer(Modifier.height(6.dp))
                     BarChart(
-                        data  = dayLabels.mapIndexed { i, l -> l to countByDow[i].toDouble() },
-                        color = Blue, highlightIndex = bestDow
+                        data           = indices.map { i -> dayLabels[i] to dowRev[i] },
+                        color          = tc.accent,
+                        highlightIndex = -1,
+                        kmData         = indices.map { i -> dowKm[i] },
+                        countData      = indices.map { i -> dowCnt[i] },
+                    )
+                  } else {
+                    // Standard view: 7 days of selected week
+                    val mondayMs = remember(trendOffset) {
+                        val c = Calendar.getInstance()
+                        c.set(Calendar.HOUR_OF_DAY, 0); c.set(Calendar.MINUTE, 0)
+                        c.set(Calendar.SECOND, 0);      c.set(Calendar.MILLISECOND, 0)
+                        c.add(Calendar.DAY_OF_MONTH, -((c.get(Calendar.DAY_OF_WEEK) - Calendar.MONDAY + 7) % 7))
+                        c.add(Calendar.DAY_OF_MONTH, trendOffset * 7)
+                        c.timeInMillis
+                    }
+                    val (rev7, km7, cnt7) = remember(allRides, mondayMs, settings.includeTipsInTotal) {
+                        val rev = DoubleArray(7); val km = DoubleArray(7); val cnt = IntArray(7)
+                        allRides.forEach { ride ->
+                            val rc = Calendar.getInstance().apply {
+                                timeInMillis = ride.logicalTime()
+                                set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+                                set(Calendar.SECOND, 0);      set(Calendar.MILLISECOND, 0)
+                            }
+                            val diff = ((rc.timeInMillis - mondayMs) / 86_400_000L).toInt()
+                            if (diff in 0..6) {
+                                rev[diff] += ride.price + if (settings.includeTipsInTotal) ride.tip else 0.0
+                                km[diff]  += ride.kilometers
+                                cnt[diff]++
+                            }
+                        }
+                        Triple(rev, km, cnt)
+                    }
+                    // Day labels: "Пн\n14"
+                    val dayBarLabels = remember(mondayMs) {
+                        (0..6).map { d ->
+                            val c = Calendar.getInstance().apply { timeInMillis = mondayMs + d * 86_400_000L }
+                            "${dayLabels[d]}\n${c.get(Calendar.DAY_OF_MONTH)}"
+                        }
+                    }
+                    val highlightDay = if (trendOffset == 0) curDow else -1
+
+                    // Sort if needed
+                    val indices = if (trendSortByValue)
+                        (0..6).sortedByDescending { rev7[it] }
+                    else (0..6).toList()
+
+                    val barData  = indices.map { i -> dayBarLabels[i] to rev7[i] }
+                    val barKm    = indices.map { i -> km7[i] }
+                    val barCount = indices.map { i -> cnt7[i] }
+                    val hlIdx    = if (trendSortByValue) -1 else highlightDay
+
+                    Text(st.revenueByDow, color = tc.muted, fontSize = 11.sp)
+                    Spacer(Modifier.height(6.dp))
+                    BarChart(
+                        data           = barData,
+                        color          = tc.accent,
+                        highlightIndex = hlIdx,
+                        kmData         = barKm,
+                        countData      = barCount,
+                    )
+                  } // end else (standard week view)
+                } // end key
+
+                // ── By week (weeks of selected month) ─────────
+                TrendMode.WEEK -> {
+                    val (wYear, wMonth) = remember(trendOffset) {
+                        val c = Calendar.getInstance()
+                        c.add(Calendar.MONTH, trendOffset)
+                        c.get(Calendar.YEAR) to c.get(Calendar.MONTH)
+                    }
+                    val weeks = remember(wYear, wMonth) { pfWeeksInMonth(wYear, wMonth) }
+                    val weekFmt = remember { SimpleDateFormat("d MMM", Locale.getDefault()) }
+                    val (wRev, wKm, wCnt) = remember(allRides, weeks, settings.includeTipsInTotal) {
+                        val rev = DoubleArray(weeks.size)
+                        val km  = DoubleArray(weeks.size)
+                        val cnt = IntArray(weeks.size)
+                        allRides.forEach { ride ->
+                            val t = ride.logicalTime()
+                            weeks.forEachIndexed { idx, (ws, we) ->
+                                if (t in ws..we) {
+                                    rev[idx] += ride.price + if (settings.includeTipsInTotal) ride.tip else 0.0
+                                    km[idx]  += ride.kilometers
+                                    cnt[idx]++
+                                }
+                            }
+                        }
+                        Triple(rev, km, cnt)
+                    }
+                    // Highlight current week
+                    val nowMs = System.currentTimeMillis()
+                    val hlWeek = if (trendOffset == 0)
+                        weeks.indexOfFirst { (ws, we) -> nowMs in ws..we } else -1
+                    val wLabels = weeks.mapIndexed { idx, (ws, we) ->
+                        "${weekFmt.format(Date(ws))}\n–${weekFmt.format(Date(we))}"
+                    }
+
+                    val indices = if (trendSortByValue)
+                        weeks.indices.sortedByDescending { wRev[it] }
+                    else weeks.indices.toList()
+
+                    Text(st.revenueByDow, color = tc.muted, fontSize = 11.sp)
+                    Spacer(Modifier.height(6.dp))
+                    BarChart(
+                        data           = indices.map { i -> wLabels[i] to wRev[i] },
+                        color          = tc.blue,
+                        highlightIndex = if (trendSortByValue) -1 else hlWeek,
+                        kmData         = indices.map { i -> wKm[i] },
+                        countData      = indices.map { i -> wCnt[i] },
                     )
                 }
-                1 -> {
-                    Text(st.revenueByHour, color = Muted, fontSize = 11.sp)
+
+                // ── By month (months of selected year) ────────
+                TrendMode.MONTH -> {
+                    val targetYear = curYear + trendOffset
+                    val (mRev, mKm, mCnt) = remember(allRides, targetYear, settings.includeTipsInTotal) {
+                        val rev = DoubleArray(12); val km = DoubleArray(12); val cnt = IntArray(12)
+                        allRides.forEach { ride ->
+                            val c = Calendar.getInstance().apply { timeInMillis = ride.logicalTime() }
+                            if (c.get(Calendar.YEAR) == targetYear) {
+                                val m = c.get(Calendar.MONTH)
+                                rev[m] += ride.price + if (settings.includeTipsInTotal) ride.tip else 0.0
+                                km[m]  += ride.kilometers
+                                cnt[m]++
+                            }
+                        }
+                        Triple(rev, km, cnt)
+                    }
+                    val hlMonth = if (trendOffset == 0) curMon else -1
+
+                    val indices = if (trendSortByValue)
+                        (0..11).sortedByDescending { mRev[it] }
+                    else (0..11).toList()
+
+                    Text(st.revenueByMonth, color = tc.muted, fontSize = 11.sp)
+                    Spacer(Modifier.height(6.dp))
+                    BarChart(
+                        data           = indices.map { i -> monthLabels[i] to mRev[i] },
+                        color          = tc.green,
+                        highlightIndex = if (trendSortByValue) -1 else hlMonth,
+                        kmData         = indices.map { i -> mKm[i] },
+                        countData      = indices.map { i -> mCnt[i] },
+                    )
+                }
+
+                // ── By year ────────────────────────────────────
+                TrendMode.YEAR -> {
+                    val yearData = remember(allRides, settings.includeTipsInTotal) {
+                        val map = sortedMapOf<Int, Triple<Double, Double, Int>>()
+                        allRides.forEach { ride ->
+                            val y = Calendar.getInstance().apply { timeInMillis = ride.logicalTime() }
+                                .get(Calendar.YEAR)
+                            val cur = map[y] ?: Triple(0.0, 0.0, 0)
+                            val tipAdd = if (settings.includeTipsInTotal) ride.tip else 0.0
+                            map[y] = Triple(cur.first + ride.price + tipAdd, cur.second + ride.kilometers, cur.third + 1)
+                        }
+                        map
+                    }
+                    if (yearData.isEmpty()) {
+                        Text(st.noData, color = tc.muted, fontSize = 12.sp)
+                    } else {
+                        val hlYear = yearData.keys.indexOf(curYear).let { if (it >= 0) it else -1 }
+                        val entries = if (trendSortByValue)
+                            yearData.entries.sortedByDescending { it.value.first }
+                        else yearData.entries.toList()
+
+                        Text(st.revenueByMonth, color = tc.muted, fontSize = 11.sp)
+                        Spacer(Modifier.height(6.dp))
+                        BarChart(
+                            data           = entries.map { (y, v) -> "$y" to v.first },
+                            color          = Color(0xFFFF9A3C),
+                            highlightIndex = if (trendSortByValue) -1 else hlYear,
+                            kmData         = entries.map { (_, v) -> v.second },
+                            countData      = entries.map { (_, v) -> v.third },
+                        )
+                    }
+                }
+
+                // ── By hour (all-time, uses allRides — not filtered) ───
+                TrendMode.HOUR -> {
+                    val hourKm = remember(allRides) {
+                        val km = DoubleArray(24)
+                        allRides.forEach { ride ->
+                            val h = Calendar.getInstance().apply { timeInMillis = ride.startTime }
+                                .get(Calendar.HOUR_OF_DAY)
+                            km[h] += ride.kilometers
+                        }
+                        km
+                    }
+                    // Revenue per hour — computed from ALL rides, not the period filter,
+                    // so the chart shows the true all-time hourly earning pattern.
+                    val hourRevAll = remember(allRides, settings.includeTipsInTotal) {
+                        val rev = DoubleArray(24)
+                        allRides.forEach { ride ->
+                            val h = Calendar.getInstance().apply { timeInMillis = ride.startTime }
+                                .get(Calendar.HOUR_OF_DAY)
+                            rev[h] += ride.price + if (settings.includeTipsInTotal) ride.tip else 0.0
+                        }
+                        rev
+                    }
+                    val bestHourAll = hourRevAll.indices.maxByOrNull { hourRevAll[it] } ?: 0
+
+                    Text(st.revenueByHour, color = tc.muted, fontSize = 11.sp)
                     Spacer(Modifier.height(6.dp))
                     BarChart(
                         data  = (0..23).map { h ->
-                            (if (h % 3 == 0) "${h}ч" else "") to earnByHour[h]
+                            (if (h % 6 == 0) "${h}${st.hoursAbbr}" else "") to hourRevAll[h]
                         },
-                        color = Color(0xFFFF9A3C),
-                        highlightIndex = bestHour,
+                        color          = Color(0xFFFF9A3C),
+                        highlightIndex = bestHourAll,
                         maxBarHeight   = 60,
                         showValues     = false,
+                        kmData         = (0..23).map { hourKm[it] },
                     )
                     Spacer(Modifier.height(8.dp))
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text("${st.bestHourColon} ${bestHour}:00–${bestHour+1}:00",
-                            color = Gold, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                        Text(settings.formatPrice(earnByHour[bestHour]),
-                            color = Gold, fontSize = 12.sp, fontWeight = FontWeight.Bold,
+                        Text("${st.bestHourColon} ${bestHourAll}:00–${bestHourAll+1}:00",
+                            color = tc.accent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        Text(settings.formatPrice(hourRevAll[bestHourAll]),
+                            color = tc.accent, fontSize = 12.sp, fontWeight = FontWeight.Bold,
                             fontFamily = FontFamily.Monospace)
                     }
-                }
-                2 -> {
-                    Text(st.revenueByMonth, color = Muted, fontSize = 11.sp)
-                    Spacer(Modifier.height(6.dp))
-                    val curMonth = Calendar.getInstance().get(Calendar.MONTH)
-                    BarChart(
-                        data           = monthLabels.mapIndexed { i, l -> l to earnByMonth[i] },
-                        color          = Green,
-                        highlightIndex = curMonth,
-                    )
                 }
             }
         }
 
         // ── KPI таблица ──
         StatsSection(st.kpiTitle) {
-            val workHStr = if (totalWorkH > 0.05) "%.1f ч".format(totalWorkH) else "–"
+            val cardCount = filtered.count { it.paymentMethod == "CARD" }
+            val cashCount = filtered.size - cardCount
+            val cardPct   = if (filtered.isNotEmpty()) cardCount * 100 / filtered.size else 0
             listOf(
-                st.revenuePerKm     to settings.formatPrice(avgPerKm),
-                st.revenuePerHour   to (if (avgPerHour > 0) settings.formatPrice(avgPerHour) else "–"),
-                st.avgShift         to (if (uniqueShifts > 0) settings.formatPrice(avgPerShift) else "–"),
-                st.totalTips        to settings.formatPrice(totalTip),
-                st.totalWaitKpi     to "%.0f мин".format(totalWait),
-                st.workTime         to workHStr,
-                st.bestDay          to dayLabels[bestDow],
-                st.peakHour         to "${bestHour}:00 – ${bestHour+1}:00",
-                st.rideCount        to "${filtered.size}",
+                st.totalTips to settings.formatPrice(totalTip),
+                st.bestDay   to dayLabels[bestDow],
+                st.peakHour  to "${bestHour}:00 – ${bestHour+1}:00",
+                st.rideCount to "${filtered.size}",
+                "${st.card.replace("💳 ", "")} / ${st.cash.replace("💵 ", "")}" to "$cardCount / $cashCount  ($cardPct%)",
             ).forEach { (k, v) ->
                 Row(
                     Modifier.fillMaxWidth().padding(vertical = 6.dp),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text(k, color = Muted, fontSize = 13.sp)
-                    Text(v, color = Color.White, fontSize = 13.sp,
+                    Text(k, color = tc.muted, fontSize = 13.sp)
+                    Text(v, color = tc.textPrimary, fontSize = 13.sp,
                         fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
                 }
-                HorizontalDivider(color = Color(0xFF1E2430), thickness = 0.5.dp)
+                HorizontalDivider(color = tc.surface, thickness = 0.5.dp)
             }
         }
 
-        // ── Ефективност bars ──
-        StatsSection(st.efficiencyTitle) {
-            val totalTime = filtered.sumOf {
-                (it.endTime - it.startTime) / 60_000.0
-            }.coerceAtLeast(1.0)
-            val drivePct = ((totalTime - totalWait) / totalTime * 100).coerceIn(0.0, 100.0)
-            val waitPct  = (totalWait / totalTime * 100).coerceIn(0.0, 100.0)
-
-            EffBar(st.timeWithClient, drivePct, Green)
-            Spacer(Modifier.height(8.dp))
-            EffBar(st.waitEfficiency, waitPct, Color(0xFFA78BFA))
-        }
-
-        // ── Топ маршрути ──
+        // ── Най-чести маршрути ──
         if (topRoutes.isNotEmpty()) {
             StatsSection(st.topRoutesTitle) {
                 topRoutes.forEachIndexed { i, (route, data) ->
@@ -388,71 +764,257 @@ fun StatsScreen(vm: RideViewModel) {
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.weight(1f)) {
-                            Text("${i+1}.", color = Gold, fontSize = 13.sp,
+                            Text("${i+1}.", color = tc.accent, fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold)
                             Column {
-                                Text(route, color = Color.White, fontSize = 12.sp,
+                                Text(route, color = tc.textPrimary, fontSize = 12.sp,
                                     fontWeight = FontWeight.SemiBold)
-                                Text("$count ${st.timesLabel}", color = Muted, fontSize = 10.sp)
+                                Text("$count ${st.timesLabel}", color = tc.muted, fontSize = 10.sp)
                             }
                         }
                         Text(settings.formatPrice(totalPrice / count),
-                            color = Gold, fontSize = 13.sp,
+                            color = tc.accent, fontSize = 13.sp,
                             fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
                     }
                     if (i < topRoutes.size - 1)
-                        HorizontalDivider(color = Color(0xFF1E2430), thickness = 0.5.dp)
+                        HorizontalDivider(color = tc.surface, thickness = 0.5.dp)
+                }
+            }
+        }
+
+        // ── Records ──────────────────────────────────────────────
+        if (allRides.isNotEmpty()) {
+            val kmRidesAll = allRides.filter { it.kilometers > 0.01 }
+            data class RecordEntry(val label: String, val value: String, val color: Color, val ride: Ride)
+            val recordEntries = buildList {
+                if (kmRidesAll.size >= 2) {
+                    kmRidesAll.maxByOrNull { it.kilometers }?.let {
+                        add(RecordEntry(st.facts.factLongestKm, "%.1f km".format(it.kilometers), Color(0xFF29B6F6), it))
+                    }
+                }
+                allRides.maxByOrNull { it.price }?.let {
+                    add(RecordEntry(st.facts.factHighestFare, settings.formatPrice(it.price), Color(0xFF4CAF50), it))
+                }
+                allRides.filter { it.tip > 0.01 }.maxByOrNull { it.tip }?.let {
+                    add(RecordEntry(st.facts.factBiggestTip, settings.formatPrice(it.tip), Color(0xFFCE93D8), it))
+                }
+                allRides.filter { it.waitMinutes > 0.5 }.maxByOrNull { it.waitMinutes }?.let {
+                    add(RecordEntry(st.facts.factLongestWait, "%.0f ${st.minAbbr}".format(it.waitMinutes), Color(0xFFFF9800), it))
+                }
+                allRides.filter { it.endTime > it.startTime }.maxByOrNull { it.endTime - it.startTime }?.let {
+                    val m = ((it.endTime - it.startTime) / 60_000L).toInt()
+                    add(RecordEntry(st.facts.factLongestDuration, "$m ${st.minAbbr}", Color(0xFFF5C842), it))
+                }
+                kmRidesAll.filter { it.price > 0.01 }.maxByOrNull { it.price / it.kilometers }?.let {
+                    val perKm = it.price / it.kilometers
+                    add(RecordEntry(st.facts.factBestPerKm, settings.formatPrice(perKm) + "/${settings.distanceUnit.shortLabel}", Color(0xFFFF9A3C), it))
+                }
+                if (kmRidesAll.size >= 2) {
+                    kmRidesAll.minByOrNull { it.kilometers }?.let {
+                        add(RecordEntry(st.facts.factShortestKm, "%.1f km".format(it.kilometers), Color(0xFF78909C), it))
+                    }
+                }
+            }
+            if (recordEntries.isNotEmpty()) {
+                val sdfRec = remember { SimpleDateFormat("dd.MM.yy", Locale.getDefault()) }
+                StatsSection(st.recordsTitle) {
+                    recordEntries.forEachIndexed { idx, entry ->
+                        val ride     = entry.ride
+                        val dateStr  = sdfRec.format(Date(ride.startTime))
+                        val routeStr = when {
+                            ride.fromAddress.isNotEmpty() && ride.toAddress.isNotEmpty() ->
+                                ride.fromAddress.substringBefore(",").take(16) + " → " +
+                                ride.toAddress.substringBefore(",").take(16)
+                            ride.fromAddress.isNotEmpty() ->
+                                ride.fromAddress.substringBefore(",").take(30)
+                            else -> "${st.ridePrefix}${ride.globalId}"
+                        }
+                        Row(
+                            Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment     = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text(entry.label, color = entry.color, fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold)
+                                Text(routeStr, color = tc.textPrimary, fontSize = 12.sp,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(dateStr, color = tc.muted, fontSize = 10.sp)
+                            }
+                            Text(entry.value, color = entry.color, fontSize = 14.sp,
+                                fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
+                        }
+                        if (idx < recordEntries.lastIndex)
+                            HorizontalDivider(color = tc.surface, thickness = 0.5.dp)
+                    }
                 }
             }
         }
 
         // ── Разбивка разходи ──
         StatsSection(st.breakdownTitle) {
-            val fuel = totalKm * 0.18
-            val tax  = total * 0.15
-            listOf(
-                Triple(st.grossRevenue, "+${settings.formatPrice(total)}",   Color.White),
-                Triple(st.fuelBreakdown, "-${settings.formatPrice(fuel)}",   Red),
-                Triple(st.taxBreakdown, "-${settings.formatPrice(tax)}",     Red),
-                Triple(st.netProfit, "+${settings.formatPrice(netProfit)}",  Green),
-            ).forEach { (k, v, c) ->
+            val taxCost        = filtered.sumOf { it.price * it.taxPercent / 100.0 }
+            val totalGpsKm     = filtered.sumOf { it.kilometers - it.adjustmentKm }
+            // Average fuel rate from rides, applied to TOTAL km (incl. dead miles)
+            val clientFuelCost = filtered.sumOf { (it.kilometers - it.adjustmentKm) * it.fuelCostPerKm }
+            val avgFuelRate    = if (totalGpsKm > 0) clientFuelCost / totalGpsKm else 0.0
+            val fuelCost       = (if (totalShiftKm > totalGpsKm + 0.05) totalShiftKm else totalGpsKm) * avgFuelRate
+            val avgTaxRate  = if (total > 0) taxCost / total * 100.0 else 0.0
+            val fuelLbl     = "${st.fuelLabel} (~%.2f/${settings.distanceUnit.shortLabel})".format(avgFuelRate)
+            val taxLbl      = "${st.taxInsurance} (~%.1f%%)".format(avgTaxRate)
+
+            // ── Custom expenses per tariff ──────────────────────────
+            // Determine fractional months covered by the filter range so that
+            // a $190/month expense shows ~$44 for a week and ~$6 for a day.
+            val msPerMonth = 30.44 * 86_400_000.0
+            val filteredMonths: Double = when {
+                filtered.isEmpty() -> 0.0
+                filterFromMs != null && filterToMs != null ->
+                    ((filterToMs!! - filterFromMs!!).coerceAtLeast(1L)) / msPerMonth
+                else -> {
+                    val minMs = filtered.minOf { it.startTime }
+                    val maxMs = filtered.maxOf { it.startTime }
+                    ((maxMs - minMs + 86_400_000L).coerceAtLeast(86_400_000L)) / msPerMonth
+                }
+            }
+            val rideCount    = filtered.size
+            val shiftCount   = uniqueShifts.coerceAtLeast(if (rideCount > 0) 1 else 0)
+            // Deduplicate expenses by name — the same real-world expense (e.g. monthly insurance)
+            // can appear in multiple tariffs with identical settings; count it only once.
+            data class CustomExpRow(val name: String, val cost: Double)
+            val customRows = allExpenses
+                .groupBy { it.name }
+                .map { (_, exps) ->
+                    val exp  = exps.first()   // same expense in all tariffs — one entry is enough
+                    val cost = when (exp.freq) {
+                        ExpenseFrequency.PER_RIDE  -> if (exp.expType == ExpenseType.FIXED)
+                            exp.amount * rideCount
+                            else exp.amount / 100.0 * total
+                        ExpenseFrequency.PER_SHIFT -> if (exp.expType == ExpenseType.FIXED)
+                            exp.amount * shiftCount
+                            else exp.amount / 100.0 * total
+                        ExpenseFrequency.PER_MONTH -> if (exp.expType == ExpenseType.FIXED)
+                            exp.amount * filteredMonths
+                            else exp.amount / 100.0 * total
+                    }
+                    CustomExpRow(exp.name, cost)
+                }
+                .filter { it.cost > 0.0 }
+
+            val totalCustomCost = customRows.sumOf { it.cost }
+            val adjustedNet     = netProfit - totalCustomCost
+
+            val rows = mutableListOf(
+                Triple(st.grossRevenue, "+${settings.formatPrice(total)}",      tc.textPrimary),
+                Triple(fuelLbl,         "-${settings.formatPrice(fuelCost)}",   tc.red),
+                Triple(taxLbl,          "-${settings.formatPrice(taxCost)}",    tc.red),
+            )
+            customRows.forEach { exp ->
+                rows.add(Triple(exp.name, "-${settings.formatPrice(exp.cost)}", tc.red))
+            }
+            rows.add(Triple(st.netProfit,
+                (if (adjustedNet >= 0) "+" else "") + settings.formatPrice(adjustedNet),
+                if (adjustedNet >= 0) tc.green else tc.red))
+
+            rows.forEach { (k, v, c) ->
                 Row(
                     Modifier.fillMaxWidth().padding(vertical = 6.dp),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text(k, color = Muted, fontSize = 13.sp)
+                    Text(k, color = tc.muted, fontSize = 13.sp, modifier = Modifier.weight(1f),
+                        overflow = TextOverflow.Ellipsis, maxLines = 1)
                     Text(v, color = c, fontSize = 13.sp,
                         fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
                 }
-                HorizontalDivider(color = Color(0xFF1E2430), thickness = 0.5.dp)
+                HorizontalDivider(color = tc.surface, thickness = 0.5.dp)
             }
         }
 
         Spacer(Modifier.height(16.dp))
     }
+
+    // ── Goal dialog ───────────────────────────────────────────
+    if (showGoalDialog) {
+        AlertDialog(
+            onDismissRequest = { showGoalDialog = false },
+            containerColor   = LocalThemeColors.current.card,
+            title = {
+                Text(st.goal.setGoalTitle, color = LocalThemeColors.current.textPrimary,
+                    fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            },
+            text = {
+                OutlinedTextField(
+                    value           = goalInput,
+                    onValueChange   = { goalInput = it },
+                    placeholder     = { Text(st.goal.setGoalHint,
+                        color = LocalThemeColors.current.muted, fontSize = 13.sp) },
+                    singleLine      = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    prefix          = { Text(settings.currency.symbol,
+                        color = LocalThemeColors.current.muted) },
+                    modifier        = Modifier.fillMaxWidth(),
+                    colors          = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor   = LocalThemeColors.current.accent,
+                        unfocusedBorderColor = LocalThemeColors.current.surface,
+                        focusedTextColor     = LocalThemeColors.current.textPrimary,
+                        unfocusedTextColor   = LocalThemeColors.current.textPrimary,
+                        cursorColor          = LocalThemeColors.current.accent,
+                    ),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val v = goalInput.trim().toDoubleOrNull() ?: 0.0
+                        scope.launch { repo.setWeeklyGoal(v) }
+                        showGoalDialog = false
+                    },
+                    enabled = goalInput.trim().toDoubleOrNull() != null,
+                ) {
+                    Text("OK", color = LocalThemeColors.current.accent, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                if (weeklyGoal > 0) {
+                    TextButton(onClick = {
+                        scope.launch { repo.setWeeklyGoal(0.0) }
+                        showGoalDialog = false
+                    }) {
+                        Text(st.goal.removeGoal, color = LocalThemeColors.current.red, fontSize = 12.sp)
+                    }
+                } else {
+                    TextButton(onClick = { showGoalDialog = false }) {
+                        Text(st.cancelBtn, color = LocalThemeColors.current.muted)
+                    }
+                }
+            }
+        )
+    }
 }
 
 @Composable
 fun StatCard2(label: String, value: String, sub: String, color: Color, modifier: Modifier) {
+    val tc = LocalThemeColors.current
     Card(modifier = modifier,
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF161A22)),
+        colors = CardDefaults.cardColors(containerColor = tc.card),
         shape  = RoundedCornerShape(14.dp)) {
         Column(Modifier.padding(14.dp)) {
-            Text(label, color = Muted, fontSize = 10.sp, letterSpacing = 1.sp)
+            Text(label, color = tc.muted, fontSize = 10.sp, letterSpacing = 1.sp)
             Spacer(Modifier.height(6.dp))
             Text(value, color = color, fontSize = 20.sp,
                 fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
-            Text(sub, color = Muted, fontSize = 10.sp)
+            Text(sub, color = tc.muted, fontSize = 10.sp)
         }
     }
 }
 
 @Composable
 fun StatsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF161A22)),
+    val tc = LocalThemeColors.current
+    Card(colors = CardDefaults.cardColors(containerColor = tc.card),
         shape = RoundedCornerShape(14.dp)) {
         Column(Modifier.padding(16.dp)) {
-            Text(title, color = Color.White, fontSize = 14.sp,
+            Text(title, color = tc.textPrimary, fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(12.dp))
             content()
@@ -462,16 +1024,17 @@ fun StatsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
 
 @Composable
 fun EffBar(label: String, pct: Double, color: Color) {
+    val tc = LocalThemeColors.current
     Column {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(label, color = Color.White, fontSize = 12.sp)
+            Text(label, color = tc.textPrimary, fontSize = 12.sp)
             Text("%.0f%%".format(pct), color = color, fontSize = 12.sp,
                 fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.height(4.dp))
         Box(
             Modifier.fillMaxWidth().height(8.dp)
-                .background(Color(0xFF1E2430), RoundedCornerShape(4.dp))
+                .background(tc.surface, RoundedCornerShape(4.dp))
         ) {
             Box(
                 Modifier.fillMaxWidth(pct.toFloat() / 100f).fillMaxHeight()
@@ -481,6 +1044,8 @@ fun EffBar(label: String, pct: Double, color: Color) {
     }
 }
 
+enum class TrendMode { DAY, WEEK, MONTH, YEAR, HOUR }
+
 private fun startOfDay(ms: Long): Long {
     val c = Calendar.getInstance().apply { timeInMillis = ms }
     c.set(Calendar.HOUR_OF_DAY, 0); c.set(Calendar.MINUTE, 0)
@@ -489,39 +1054,75 @@ private fun startOfDay(ms: Long): Long {
 }
 
 @Composable
+private fun LegendDot(color: Color, label: String) {
+    val tc = LocalThemeColors.current
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Box(
+            Modifier
+                .size(8.dp)
+                .background(color, androidx.compose.foundation.shape.CircleShape)
+        )
+        Text(label, color = tc.muted, fontSize = 10.sp)
+    }
+}
+
+@Composable
 private fun BarChart(
-    data: List<Pair<String, Double>>,
+    data: List<Pair<String, Double>>,   // (x-label, revenue)
     color: Color,
     highlightIndex: Int = -1,
     maxBarHeight: Int = 80,
     showValues: Boolean = true,
+    kmData: List<Double>? = null,       // optional km per bar
+    countData: List<Int>? = null,       // optional ride count per bar (shown inside bar)
 ) {
-    val maxVal = data.maxOfOrNull { it.second }?.coerceAtLeast(0.01) ?: return
+    val tc       = LocalThemeColors.current
+    val settings = LocalSettings.current
+    val maxVal   = data.maxOfOrNull { it.second }?.coerceAtLeast(0.01) ?: return
+    // Extra top space: revenue label + optional km label
+    val topPad = if (showValues) (if (kmData != null) 26 else 14) else 0
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height((maxBarHeight + 36).dp),
+            .height((maxBarHeight + 40 + topPad).dp),
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment     = Alignment.Bottom,
     ) {
         data.forEachIndexed { idx, (label, value) ->
             val frac     = (value / maxVal).toFloat().coerceIn(0f, 1f)
             val barColor = if (idx == highlightIndex) color else color.copy(alpha = 0.45f)
+            val km       = kmData?.getOrNull(idx) ?: 0.0
+            val cnt      = countData?.getOrNull(idx) ?: 0
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Bottom,
                 modifier = Modifier.weight(1f),
             ) {
+                // Revenue value — use currency symbol from user settings
                 if (showValues && value > 0) {
                     Text(
-                        text     = if (value >= 100) "%.0f".format(value)
-                                   else              "%.1f".format(value),
-                        color    = barColor,
-                        fontSize = 7.sp,
-                        maxLines = 1,
+                        text      = settings.formatPrice(value),
+                        color     = barColor,
+                        fontSize  = 7.sp,
+                        maxLines  = 1,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+                // km sub-label
+                if (showValues && kmData != null && km > 0) {
+                    Text(
+                        text      = "%.0f km".format(km),
+                        color     = tc.muted,
+                        fontSize  = 6.sp,
+                        maxLines  = 1,
+                        textAlign = TextAlign.Center,
                     )
                 }
                 Spacer(Modifier.height(2.dp))
+                // Bar with optional ride count inside
                 Box(
                     Modifier
                         .padding(horizontal = 2.dp)
@@ -531,13 +1132,28 @@ private fun BarChart(
                                 .coerceAtLeast(if (value > 0) 3f else 0f)
                                 .dp
                         )
-                        .background(barColor, RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp))
-                )
+                        .background(barColor, RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp)),
+                    contentAlignment = Alignment.BottomCenter,
+                ) {
+                    if (countData != null && cnt > 0 && frac > 0.15f) {
+                        Text(
+                            text      = "$cnt",
+                            color     = Color.White.copy(alpha = 0.5f),
+                            fontSize  = 6.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier  = Modifier.padding(bottom = 2.dp),
+                        )
+                    }
+                }
                 Spacer(Modifier.height(3.dp))
+                // X-axis label (supports "\n" for two-line labels like "Пн\n14")
                 Text(
-                    text     = label,
-                    color    = if (idx == highlightIndex) color else Muted,
-                    fontSize = 8.sp,
+                    text      = label,
+                    color     = if (idx == highlightIndex) color else tc.muted,
+                    fontSize  = 7.sp,
+                    textAlign = TextAlign.Center,
+                    lineHeight = 9.sp,
+                    maxLines  = 2,
                 )
             }
         }

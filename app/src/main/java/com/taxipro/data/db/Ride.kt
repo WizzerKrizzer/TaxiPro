@@ -41,4 +41,19 @@ data class Ride(
 
     // Смяна
     val shiftId: Long = 0,
+
+    // Снимка на тарифните разходи при запазване на курса
+    val taxPercent: Double    = 0.0,
+    val fuelCostPerKm: Double = 0.0,
+
+    // km added via fare-adjustment inference (not GPS-measured).
+    // Fuel cost is calculated only on GPS km = kilometers - adjustmentKm.
+    @ColumnInfo(defaultValue = "0") val adjustmentKm: Double = 0.0,
+
+    // True when start and end are in the same zone (internal ride).
+    // Stored for future statistics; not yet displayed anywhere in the UI.
+    @ColumnInfo(defaultValue = "0") val isInternal: Boolean = false,
+
+    // Payment method: "CASH" or "CARD"
+    @ColumnInfo(defaultValue = "CASH") val paymentMethod: String = "CASH",
 )
