@@ -116,6 +116,37 @@ data class DistUnitStrings(
     val convertingMsg: String  = "",
 )
 
+data class ExportStrings(
+    // More menu card
+    val menuTitle       : String = "Export & Backup",
+    val menuSub         : String = "PDF export and data backup",
+    // Screen
+    val screenTitle     : String = "Export & Backup",
+    val screenSub       : String = "Share your data or transfer it to another device",
+    // PDF
+    val pdfCardTitle    : String = "Export PDF Report",
+    val pdfCardSub      : String = "All rides and shift summaries in a printable PDF file",
+    val pdfBtn          : String = "Generate PDF",
+    val pdfGenerating   : String = "Working…",
+    val pdfSuccess      : String = "PDF ready",
+    val pdfFailed       : String = "Failed to generate PDF",
+    // Backup
+    val backupCardTitle : String = "Create Backup",
+    val backupCardSub   : String = "Save all your data to a file for transfer or storage",
+    val backupBtn       : String = "Create Backup File",
+    val backupSuccess   : String = "Backup created",
+    val backupFailed    : String = "Backup failed",
+    // Restore
+    val restoreCardTitle : String = "Restore Backup",
+    val restoreCardSub   : String = "Import data from a previously created .taxipro backup file",
+    val restoreBtn       : String = "Select Backup File",
+    val restoreWarnTitle : String = "Replace all data?",
+    val restoreWarnMsg   : String = "All current rides, shifts, tariffs and zones will be replaced with the contents of the backup file. This cannot be undone.",
+    val restoreConfirm   : String = "Yes, restore",
+    val restoreSuccess   : String = "Data restored successfully",
+    val restoreFailed    : String = "Failed to restore backup",
+)
+
 data class CurrencyChangeStrings(
     val autoDetectNote: String  = "",
     val changeCurrencyBtn: String = "",
@@ -454,6 +485,7 @@ class AppStrings(
     val currencyChange: CurrencyChangeStrings,
     val goal: GoalStrings,
     val distUnitChange: DistUnitStrings,
+    val export: ExportStrings = ExportStrings(),
 )
 
 // ── English ──────────────────────────────────────────────────────
@@ -1081,6 +1113,31 @@ val BgStrings = AppStrings(
         convertBtn    = "Преобразувай",
         skipBtn       = "Пропусни",
         convertingMsg = "Преобразуване…",
+    ),
+    export = ExportStrings(
+        menuTitle        = "Експорт и Архив",
+        menuSub          = "PDF отчет и архивиране на данни",
+        screenTitle      = "Експорт и Архив",
+        screenSub        = "Споделете данните си или ги прехвърлете на друго устройство",
+        pdfCardTitle     = "Генерирай PDF Отчет",
+        pdfCardSub       = "Всички курсове и обобщения на смени в печатаем PDF файл",
+        pdfBtn           = "Генерирай PDF",
+        pdfGenerating    = "Обработка…",
+        pdfSuccess       = "PDF е готов",
+        pdfFailed        = "Грешка при генериране на PDF",
+        backupCardTitle  = "Създай Архив",
+        backupCardSub    = "Запазете всички данни във файл за прехвърляне или съхранение",
+        backupBtn        = "Създай Архивен Файл",
+        backupSuccess    = "Архивът е създаден",
+        backupFailed     = "Грешка при архивиране",
+        restoreCardTitle = "Възстанови от Архив",
+        restoreCardSub   = "Импортирайте данни от предишно създаден .taxipro файл",
+        restoreBtn       = "Избери Архивен Файл",
+        restoreWarnTitle = "Заместване на всички данни?",
+        restoreWarnMsg   = "Всички текущи курсове, смени, тарифи и зони ще бъдат заменени с тези от архива. Не може да се отмени.",
+        restoreConfirm   = "Да, възстанови",
+        restoreSuccess   = "Данните са възстановени успешно",
+        restoreFailed    = "Грешка при възстановяване",
     ),
 )
 

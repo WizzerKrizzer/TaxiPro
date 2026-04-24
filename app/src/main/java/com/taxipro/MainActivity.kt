@@ -122,7 +122,7 @@ fun MainApp(vm: TrackingViewModel, settingsRepo: SettingsRepository) {
     var selected by remember { mutableStateOf("ride") }
 
     val activeTab = when (selected) {
-        "история", "история_смени", "calc", "zones", "zone_creator", "premium" -> "more"
+        "история", "история_смени", "calc", "zones", "zone_creator", "premium", "export" -> "more"
         "advanced_settings" -> "settings"
         else -> selected
     }
@@ -180,6 +180,7 @@ fun MainApp(vm: TrackingViewModel, settingsRepo: SettingsRepository) {
                         onBack = { selected = "zones" },
                     )
                 }
+                "export"        -> ExportScreen()
                 else            -> ActiveRideScreen(vm, rideVm)
             }
         }
