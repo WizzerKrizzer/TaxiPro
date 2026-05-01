@@ -16,6 +16,7 @@ import androidx.compose.ui.unit.sp
 
 @Composable
 fun MapScreen(vm: TrackingViewModel) {
+    val tc      = LocalThemeColors.current
     val state by vm.state.collectAsState()
     val context = androidx.compose.ui.platform.LocalContext.current
 
@@ -57,30 +58,21 @@ fun MapScreen(vm: TrackingViewModel) {
     var locationReady by remember { mutableStateOf(false) }
 
     val cameraState = rememberCameraPositionState {
-        position = CameraPosition.fromLatLngZoom(LatLng(0.0, 0.0), 15f)
+        position = CameraPosition.fromLatLngZoom(LatLng(0.0, 0.0), 17f)
     }
 
-    LaunchedEffect(displayLat, displayLng) {
-        if (displayLat != 0.0 && displayLng != 0.0 && !locationReady) {
-            locationReady = true
-            cameraState.animate(
-                CameraUpdateFactory.newLatLngZoom(
-                    LatLng(displayLat, displayLng), 15f
-                )
-            )
-        } else if (displayLat != 0.0 && displayLng != 0.0) {
-            cameraState.animate(
-                CameraUpdateFactory.newLatLng(LatLng(displayLat, displayLng))
-            )
-        }
-    }
-
-    // Следи позицията в реално време
     LaunchedEffect(displayLat, displayLng) {
         if (displayLat != 0.0 && displayLng != 0.0) {
-            cameraState.animate(
-                CameraUpdateFactory.newLatLng(LatLng(displayLat, displayLng))
-            )
+            if (!locationReady) {
+                locationReady = true
+                cameraState.animate(
+                    CameraUpdateFactory.newLatLngZoom(LatLng(displayLat, displayLng), 17f)
+                )
+            } else {
+                cameraState.animate(
+                    CameraUpdateFactory.newLatLng(LatLng(displayLat, displayLng))
+                )
+            }
         }
     }
 
@@ -131,7 +123,7 @@ fun MapScreen(vm: TrackingViewModel) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color(0xFF0A0C10)), // Тъмен фон
+                    .background(tc.background), // Тъмен фон
                 contentAlignment = androidx.compose.ui.Alignment.Center
             ) {
                 androidx.compose.foundation.layout.Column(
@@ -139,10 +131,10 @@ fun MapScreen(vm: TrackingViewModel) {
                     verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(16.dp)
                 ) {
                     // Въртящото се кръгче
-                    androidx.compose.material3.CircularProgressIndicator(color = Color(0xFFF5C842))
+                    androidx.compose.material3.CircularProgressIndicator(color = tc.accent)
                     androidx.compose.material3.Text(
                         text = "Getting your location...",
-                        color = Color(0xFF6B7280),
+                        color = tc.muted,
                         fontSize = 14.sp
                     )
                 }

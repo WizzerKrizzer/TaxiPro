@@ -19,6 +19,7 @@ import androidx.compose.ui.unit.*
 
 @Composable
 fun LocationPermissionScreen(onGranted: () -> Unit) {
+    val tc   = LocalThemeColors.current
     var step by remember { mutableStateOf(1) }  // 1 = fine location, 2 = background
 
     // Step 1: Fine + Coarse location
@@ -45,17 +46,17 @@ fun LocationPermissionScreen(onGranted: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Dark)
+            .background(tc.background)
             .padding(32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
         Icon(Icons.Default.LocationOn, null,
-            tint = Gold, modifier = Modifier.size(80.dp))
+            tint = tc.accent, modifier = Modifier.size(80.dp))
         Spacer(Modifier.height(24.dp))
 
         if (step == 1) {
-            Text("GPS Access Required", color = Color.White,
+            Text("GPS Access Required", color = tc.textPrimary,
                 fontSize = 24.sp, fontWeight = FontWeight.Black)
             Spacer(Modifier.height(12.dp))
             Text(
@@ -64,7 +65,7 @@ fun LocationPermissionScreen(onGranted: () -> Unit) {
                         "• Detect waiting time automatically\n" +
                         "• Show the real route on the map\n" +
                         "• Keep tracking with screen off",
-                color = Muted, fontSize = 14.sp,
+                color = tc.muted, fontSize = 14.sp,
                 textAlign = TextAlign.Center, lineHeight = 22.sp
             )
             Spacer(Modifier.height(32.dp))
@@ -76,21 +77,21 @@ fun LocationPermissionScreen(onGranted: () -> Unit) {
                     ))
                 },
                 modifier = Modifier.fillMaxWidth().height(54.dp),
-                colors   = ButtonDefaults.buttonColors(containerColor = Gold),
+                colors   = ButtonDefaults.buttonColors(containerColor = tc.accent),
                 shape    = RoundedCornerShape(14.dp)
             ) {
-                Text("ALLOW GPS", color = Dark,
+                Text("ALLOW GPS", color = tc.background,
                     fontWeight = FontWeight.Black, fontSize = 15.sp)
             }
         } else {
-            Text("Always-on GPS", color = Color.White,
+            Text("Always-on GPS", color = tc.textPrimary,
                 fontSize = 24.sp, fontWeight = FontWeight.Black)
             Spacer(Modifier.height(12.dp))
             Text(
                 "For GPS to work with the screen off, tap 'Allow' " +
                         "and then select \"Allow all the time\" in the next screen.\n\n" +
                         "This lets TaxiPro keep tracking when your phone is in your pocket.",
-                color = Muted, fontSize = 14.sp,
+                color = tc.muted, fontSize = 14.sp,
                 textAlign = TextAlign.Center, lineHeight = 22.sp
             )
             Spacer(Modifier.height(32.dp))
@@ -103,15 +104,15 @@ fun LocationPermissionScreen(onGranted: () -> Unit) {
                     }
                 },
                 modifier = Modifier.fillMaxWidth().height(54.dp),
-                colors   = ButtonDefaults.buttonColors(containerColor = Gold),
+                colors   = ButtonDefaults.buttonColors(containerColor = tc.accent),
                 shape    = RoundedCornerShape(14.dp)
             ) {
-                Text("ALLOW ALWAYS-ON GPS", color = Dark,
+                Text("ALLOW ALWAYS-ON GPS", color = tc.background,
                     fontWeight = FontWeight.Black, fontSize = 15.sp)
             }
             Spacer(Modifier.height(12.dp))
             TextButton(onClick = { onGranted() }) {
-                Text("Skip for now", color = Muted, fontSize = 13.sp)
+                Text("Skip for now", color = tc.muted, fontSize = 13.sp)
             }
         }
     }

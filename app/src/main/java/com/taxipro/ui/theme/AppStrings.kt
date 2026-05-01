@@ -178,6 +178,8 @@ data class HistoryStrings(
     val editRouteConfirmTitle: String = "",
     val editRouteConfirmMsg: String   = "",
     val applyChangesBtn: String       = "",
+    val editFareTipLabel: String      = "Edit fare & tip",
+    val fareLabel: String             = "Fare",
 )
 
 data class CalculatorStrings(
@@ -612,6 +614,8 @@ val EnStrings = AppStrings(
         editRouteConfirmTitle = "Apply route changes?",
         editRouteConfirmMsg   = "This will overwrite the ride's km, price, addresses and GPS route. Any fare adjustments baked into the current price will be cleared.",
         applyChangesBtn       = "Apply Changes",
+        editFareTipLabel      = "Edit fare & tip",
+        fareLabel             = "Fare",
     ),
     calc = CalculatorStrings(
         defaultLabel        = "Default",
@@ -926,6 +930,8 @@ val BgStrings = AppStrings(
         editRouteConfirmTitle = "Приложи промени по маршрута?",
         editRouteConfirmMsg   = "Това ще презапише км, цена, адреси и GPS маршрута на курса. Всички ценови корекции вградени в текущата цена ще бъдат изтрити.",
         applyChangesBtn       = "Приложи промени",
+        editFareTipLabel      = "Редактирай цена и бакшиш",
+        fareLabel             = "Цена",
     ),
     calc = CalculatorStrings(
         defaultLabel        = "По подразб.",

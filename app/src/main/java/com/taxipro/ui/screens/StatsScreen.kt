@@ -1098,7 +1098,7 @@ private fun BarChart(
     ) {
         data.forEachIndexed { idx, (label, value) ->
             val frac     = (value / maxVal).toFloat().coerceIn(0f, 1f)
-            val barColor = if (idx == highlightIndex) highlightColor else color.copy(alpha = 0.28f)
+            val barColor = if (idx == highlightIndex) highlightColor else color.copy(alpha = 0.55f)
             val km       = kmData?.getOrNull(idx) ?: 0.0
             val cnt      = countData?.getOrNull(idx) ?: 0
             Column(

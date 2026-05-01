@@ -52,4 +52,5 @@ dependencies {
     implementation(libs.retrofit)
     implementation(libs.retrofit.gson)
     implementation(libs.kotlinx.coroutines.android)
+    implementation("com.android.billingclient:billing-ktx:7.0.0")
 }

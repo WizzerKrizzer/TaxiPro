@@ -39,4 +39,23 @@ interface RideDao {
 
     @Query("SELECT * FROM rides WHERE shiftId = :shiftId ORDER BY startTime ASC")
     fun getRidesByShiftId(shiftId: Long): Flow<List<Ride>>
+
+    @Query("DELETE FROM rides WHERE shiftId = :shiftId")
+    suspend fun deleteByShiftId(shiftId: Long)
+
+    @Query("DELETE FROM rides")
+    suspend fun deleteAll()
+
+    @Query("SELECT * FROM rides ORDER BY startTime DESC")
+    suspend fun getAllRidesOnce(): List<Ride>
+
+    // Historical averages — used to infer proportional km/wait for manual fare adjustments
+    @Query("SELECT COALESCE(SUM(price), 0) FROM rides")
+    suspend fun getTotalRevenue(): Double
+
+    @Query("SELECT COALESCE(SUM(kilometers), 0) FROM rides")
+    suspend fun getTotalKm(): Double
+
+    @Query("SELECT COALESCE(SUM(waitMinutes), 0) FROM rides")
+    suspend fun getTotalWaitMin(): Double
 }

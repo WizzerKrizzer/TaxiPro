@@ -65,10 +65,16 @@ interface DirectionsApi {
 
     @GET("place/autocomplete/json")
     suspend fun autocomplete(
-        @Query("input") input: String,
-        @Query("key") apiKey: String,
-        @Query("language") language: String = "bg",
-        @Query("types") types: String = "geocode",
+        @Query("input")        input: String,
+        @Query("key")          apiKey: String,
+        @Query("language")     language: String = "bg",
+        @Query("types")        types: String = "geocode",
+        /** "lat,lng" — biases/restricts results toward this point */
+        @Query("location")     location: String? = null,
+        /** Bias radius in metres */
+        @Query("radius")       radius: Int? = null,
+        /** When true, returns ONLY results within location+radius (strict filter, not just bias) */
+        @Query("strictbounds") strictbounds: Boolean? = null,
     ): AutocompleteResponse
 
     @GET("geocode/json")

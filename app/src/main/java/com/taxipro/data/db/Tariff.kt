@@ -31,4 +31,7 @@ interface TariffDao {
 
     @Delete
     suspend fun delete(tariff: Tariff)
+
+    @Query("DELETE FROM tariffs")
+    suspend fun deleteAll()
 }

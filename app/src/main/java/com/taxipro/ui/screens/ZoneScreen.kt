@@ -1,0 +1,909 @@
+package com.taxipro.ui.screens
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import com.google.android.gms.maps.CameraUpdateFactory
+import com.google.android.gms.maps.model.CameraPosition
+import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.model.LatLngBounds
+import com.google.maps.android.compose.*
+import com.taxipro.data.db.*
+import com.taxipro.ui.theme.LocalSettings
+import com.taxipro.ui.theme.LocalStrings
+import com.taxipro.ui.viewmodel.RideViewModel
+import kotlin.math.roundToInt
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ZoneScreen(
+    rideVm: RideViewModel,
+    onNavigate: (String) -> Unit,
+) {
+    val tc    = LocalThemeColors.current
+    val st    = LocalStrings.current
+    val zones by rideVm.allZones.collectAsState(initial = emptyList())
+    val rides by rideVm.allRides.collectAsState(initial = emptyList())
+
+    var selectedTab  by remember { mutableIntStateOf(0) }
+    var zoneToEdit   by remember { mutableStateOf<Zone?>(null) }
+
+    // When editing a zone, show the editor full-screen (no navigation needed)
+    if (zoneToEdit != null) {
+        ZoneCreatorScreen(
+            rideVm       = rideVm,
+            existingZone = zoneToEdit,
+            onBack       = { zoneToEdit = null },
+        )
+        return
+    }
+
+    Scaffold(
+        containerColor = tc.background,
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(st.zones.zonesTitle, color = tc.textPrimary,
+                            fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        Text(st.zones.zonesSub, color = tc.muted, fontSize = 11.sp)
+                    }
+                },
+                navigationIcon = {
+                    IconButton(onClick = { onNavigate("more") }) {
+                        Icon(Icons.Default.ArrowBack, null, tint = tc.accent)
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = tc.background)
+            )
+        },
+        floatingActionButton = {
+            if (selectedTab == 0) {
+                FloatingActionButton(
+                    onClick        = { onNavigate("zone_creator") },
+                    containerColor = tc.accent,
+                    contentColor   = tc.background,
+                    shape          = RoundedCornerShape(16.dp),
+                ) {
+                    Icon(Icons.Default.Add, null)
+                }
+            }
+        }
+    ) { padding ->
+        Column(Modifier.padding(padding).fillMaxSize()) {
+            TabRow(
+                selectedTabIndex = selectedTab,
+                containerColor   = tc.background,
+                contentColor     = tc.accent,
+            ) {
+                Tab(
+                    selected = selectedTab == 0,
+                    onClick  = { selectedTab = 0 },
+                    text     = { Text(st.zones.zonesTitle,
+                        color = if (selectedTab == 0) tc.accent else tc.muted) }
+                )
+                Tab(
+                    selected = selectedTab == 1,
+                    onClick  = { selectedTab = 1 },
+                    text     = { Text(st.zones.zoneStatsTitle,
+                        color = if (selectedTab == 1) tc.accent else tc.muted) }
+                )
+            }
+
+            when (selectedTab) {
+                0 -> ZoneListTab(
+                    zones      = zones,
+                    rideVm     = rideVm,
+                    onEdit     = { zoneToEdit = it },
+                )
+                1 -> ZoneStatsTab(zones = zones, rides = rides)
+            }
+        }
+    }
+}
+
+// ── Tab 1: Zone list ──────────────────────────────────────────────────────────
+
+@Composable
+private fun ZoneListTab(
+    zones: List<Zone>,
+    rideVm: RideViewModel,
+    onEdit: (Zone) -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    val st = LocalStrings.current
+
+    var pendingDelete  by remember { mutableStateOf<Zone?>(null) }
+    var previewZone    by remember { mutableStateOf<Zone?>(null) }
+
+    if (zones.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text(
+                st.zones.noZonesYet,
+                color     = tc.muted,
+                fontSize  = 14.sp,
+                textAlign = TextAlign.Center,
+                modifier  = Modifier.padding(32.dp)
+            )
+        }
+    } else {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            zones.forEach { zone ->
+                ZoneCard(
+                    zone     = zone,
+                    onClick  = { previewZone = zone },
+                    onEdit   = { onEdit(zone) },
+                    onDelete = { pendingDelete = zone },
+                )
+            }
+            Spacer(Modifier.height(80.dp))
+        }
+    }
+
+    // Delete confirmation dialog
+    pendingDelete?.let { zone ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            containerColor   = tc.card,
+            title = {
+                Text(st.zones.zoneDeleteConfirm, color = tc.textPrimary,
+                    fontWeight = FontWeight.Bold)
+            },
+            text = { Text("\"${zone.name}\"", color = tc.muted) },
+            confirmButton = {
+                TextButton(onClick = { rideVm.deleteZone(zone); pendingDelete = null }) {
+                    Text(st.zones.zoneDeleteBtn, color = tc.red,
+                        fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) {
+                    Text(st.cancelBtn, color = tc.muted)
+                }
+            }
+        )
+    }
+
+    // Map preview dialog
+    previewZone?.let { zone ->
+        ZoneMapPreviewDialog(
+            zone      = zone,
+            allZones  = zones,
+            onDismiss = { previewZone = null },
+        )
+    }
+}
+
+@Composable
+private fun ZoneCard(
+    zone: Zone,
+    onClick: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val tc     = LocalThemeColors.current
+    val points = remember(zone.pointsJson) { parseZonePoints(zone.pointsJson) }
+    val color  = Color(zone.color)
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        colors = CardDefaults.cardColors(containerColor = tc.card),
+        shape  = RoundedCornerShape(12.dp),
+    ) {
+        Row(
+            Modifier.padding(14.dp),
+            verticalAlignment     = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // Color dot
+            Box(
+                Modifier
+                    .size(40.dp)
+                    .background(color.copy(alpha = 0.2f), RoundedCornerShape(10.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(Modifier.size(20.dp).background(color, CircleShape))
+            }
+
+            Column(Modifier.weight(1f)) {
+                Text(zone.name, color = tc.textPrimary, fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold)
+                Text(
+                    "${points.size} corners",
+                    color = tc.muted, fontSize = 11.sp
+                )
+            }
+
+            // Mini dot preview
+            Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                repeat(minOf(points.size, 10)) {
+                    Box(Modifier.size(5.dp).background(color, CircleShape))
+                }
+                if (points.size > 10) {
+                    Text("+${points.size - 10}", color = tc.muted, fontSize = 8.sp)
+                }
+            }
+
+            // Edit button
+            IconButton(onClick = onEdit, modifier = Modifier.size(36.dp)) {
+                Icon(Icons.Default.Edit, null, tint = tc.accent.copy(alpha = 0.7f),
+                    modifier = Modifier.size(18.dp))
+            }
+
+            // Delete button
+            IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
+                Icon(Icons.Default.Delete, null, tint = tc.red.copy(alpha = 0.7f),
+                    modifier = Modifier.size(18.dp))
+            }
+        }
+    }
+}
+
+// ── Zone map preview dialog ───────────────────────────────────────────────────
+
+@Composable
+private fun ZoneMapPreviewDialog(
+    zone: Zone,
+    allZones: List<Zone>,
+    onDismiss: () -> Unit,
+) {
+    val tc     = LocalThemeColors.current
+    val points = remember(zone.pointsJson) { parseZonePoints(zone.pointsJson) }
+    val color  = Color(zone.color)
+
+    val cameraState = rememberCameraPositionState {
+        val center = if (points.isNotEmpty()) LatLng(
+            points.map { it.latitude }.average(),
+            points.map { it.longitude }.average()
+        ) else LatLng(42.15, 24.75)
+        position = CameraPosition.fromLatLngZoom(center, 12f)
+    }
+
+    // Fit camera to zone bounds once map is ready
+    LaunchedEffect(points) {
+        if (points.size >= 2) {
+            val builder = LatLngBounds.Builder()
+            points.forEach { builder.include(it) }
+            cameraState.animate(CameraUpdateFactory.newLatLngBounds(builder.build(), 80))
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties       = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnClickOutside   = true,
+        )
+    ) {
+        Box(Modifier.fillMaxSize().background(tc.background)) {
+
+            GoogleMap(
+                modifier            = Modifier.fillMaxSize(),
+                cameraPositionState = cameraState,
+                uiSettings          = MapUiSettings(
+                    zoomControlsEnabled     = true,
+                    myLocationButtonEnabled = false,
+                ),
+            ) {
+                // All other zones faded
+                allZones.filter { it.id != zone.id }.forEach { other ->
+                    val pts = remember(other.pointsJson) { parseZonePoints(other.pointsJson) }
+                    if (pts.size >= 3) {
+                        Polygon(
+                            points      = pts,
+                            fillColor   = Color(other.color).copy(alpha = 0.10f),
+                            strokeColor = Color(other.color).copy(alpha = 0.30f),
+                            strokeWidth = 2f,
+                            clickable   = false,
+                        )
+                    }
+                }
+
+                // Selected zone highlighted
+                if (points.size >= 3) {
+                    Polygon(
+                        points      = points,
+                        fillColor   = color.copy(alpha = 0.35f),
+                        strokeColor = color,
+                        strokeWidth = 5f,
+                        clickable   = false,
+                    )
+                }
+            }
+
+            // Top bar overlay
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(tc.background.copy(alpha = 0.90f))
+                    .padding(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Default.Close, null, tint = tc.accent)
+                }
+                Box(
+                    Modifier
+                        .size(14.dp)
+                        .background(color, CircleShape)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    zone.name,
+                    color      = tc.textPrimary,
+                    fontSize   = 17.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}
+
+// ── Tab 2: Zone statistics ────────────────────────────────────────────────────
+
+private enum class ZoneSortOrder { PICKUPS, DROPOFFS, REVENUE, AVG_KM, AVG_TIP }
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ZoneStatsTab(zones: List<Zone>, rides: List<com.taxipro.data.db.Ride>) {
+    val tc       = LocalThemeColors.current
+    val st       = LocalStrings.current
+    val settings = LocalSettings.current
+
+    var sortOrder    by remember { mutableStateOf(ZoneSortOrder.PICKUPS) }
+    var showSortMenu by remember { mutableStateOf(false) }
+    var showRoutes   by remember { mutableStateOf(false) }
+    var selectedStat by remember { mutableStateOf<ZoneStat?>(null) }
+
+    // Period filter state — initialised to today so the first render shows today's data
+    val nowMs = remember { System.currentTimeMillis() }
+    var filterFromMs by remember { mutableStateOf<Long?>(pfStartOfDay(nowMs)) }
+    var filterToMs   by remember { mutableStateOf<Long?>(pfEndOfDay(nowMs)) }
+
+    // ── Date filtering ──────────────────────────────────────────────────
+    val filteredRides = remember(rides, filterFromMs, filterToMs) {
+        if (filterFromMs != null && filterToMs != null)
+            rides.filter { it.startTime in filterFromMs!!..filterToMs!! }
+        else
+            rides
+    }
+
+    val showLargeWarning = filterFromMs != null && filterToMs != null &&
+        (filterToMs!! - filterFromMs!!) / (1000L * 60 * 60 * 24) > 90
+
+    var isLoadingStats by remember { mutableStateOf(false) }
+    var computedStats  by remember {
+        mutableStateOf(Pair(emptyList<ZoneStat>(), emptyList<ZoneRouteStat>()))
+    }
+
+    LaunchedEffect(filteredRides, zones) {
+        isLoadingStats = true
+        val result = withContext(Dispatchers.Default) {
+            computeZoneStats(filteredRides, zones, st.zones.outsideZones)
+        }
+        computedStats  = result
+        isLoadingStats = false
+    }
+
+    val (zoneStats, routeStats) = computedStats
+
+    val sortedStats = remember(zoneStats, sortOrder) {
+        when (sortOrder) {
+            ZoneSortOrder.PICKUPS  -> zoneStats.sortedByDescending { it.pickupCount }
+            ZoneSortOrder.DROPOFFS -> zoneStats.sortedByDescending { it.dropoffCount }
+            ZoneSortOrder.REVENUE  -> zoneStats.sortedByDescending { it.avgRevenue }
+            ZoneSortOrder.AVG_KM   -> zoneStats.sortedByDescending { it.avgKm }
+            ZoneSortOrder.AVG_TIP  -> zoneStats.sortedByDescending { it.avgTip }
+        }
+    }
+
+    val sortLabel = when (sortOrder) {
+        ZoneSortOrder.PICKUPS  -> st.zones.sortByPickups
+        ZoneSortOrder.DROPOFFS -> st.zones.sortByDropoffs
+        ZoneSortOrder.REVENUE  -> st.zones.sortByRevenue
+        ZoneSortOrder.AVG_KM   -> st.zones.sortByAvgKm
+        ZoneSortOrder.AVG_TIP  -> st.zones.sortByAvgTip
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        // ── Date filter chips ───────────────────────────────────────────
+        PeriodFilterRow(
+            onRangeChanged = { f, t -> filterFromMs = f; filterToMs = t },
+        )
+
+        // ── Large range warning ─────────────────────────────────────────
+        if (showLargeWarning) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(tc.accent.copy(alpha = 0.1f), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment     = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(Icons.Default.Info, null, tint = tc.accent, modifier = Modifier.size(16.dp))
+                Text(st.zones.largeRangeWarning, color = tc.accent, fontSize = 12.sp)
+            }
+        }
+
+        // ── Loading indicator ───────────────────────────────────────────
+        if (isLoadingStats) {
+            Column(
+                Modifier.fillMaxWidth().padding(top = 32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                CircularProgressIndicator(color = tc.accent, modifier = Modifier.size(32.dp))
+                Text("Моля изчакайте…", color = tc.muted, fontSize = 13.sp)
+            }
+        }
+
+        if (!isLoadingStats && (filteredRides.isEmpty() || zoneStats.isEmpty())) {
+            Box(Modifier.fillMaxWidth().padding(top = 48.dp),
+                contentAlignment = Alignment.Center) {
+                Text(
+                    if (zones.isEmpty()) st.zones.noZonesYet else st.zones.noRidesForZones,
+                    color = tc.muted, fontSize = 14.sp, textAlign = TextAlign.Center
+                )
+            }
+        } else if (!isLoadingStats) {
+            Box {
+                OutlinedButton(
+                    onClick = { showSortMenu = true },
+                    shape   = RoundedCornerShape(10.dp),
+                    colors  = ButtonDefaults.outlinedButtonColors(contentColor = tc.accent),
+                ) {
+                    Icon(Icons.Default.Sort, null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(sortLabel, fontSize = 12.sp)
+                }
+                DropdownMenu(
+                    expanded         = showSortMenu,
+                    onDismissRequest = { showSortMenu = false },
+                    modifier         = Modifier.background(tc.card),
+                ) {
+                    listOf(
+                        ZoneSortOrder.PICKUPS  to st.zones.sortByPickups,
+                        ZoneSortOrder.DROPOFFS to st.zones.sortByDropoffs,
+                        ZoneSortOrder.REVENUE  to st.zones.sortByRevenue,
+                        ZoneSortOrder.AVG_KM   to st.zones.sortByAvgKm,
+                        ZoneSortOrder.AVG_TIP  to st.zones.sortByAvgTip,
+                    ).forEach { (order, label) ->
+                        DropdownMenuItem(
+                            text    = {
+                                Text(label,
+                                    color = if (sortOrder == order) tc.accent else tc.textPrimary)
+                            },
+                            onClick = { sortOrder = order; showSortMenu = false },
+                        )
+                    }
+                }
+            }
+
+            sortedStats.forEach { stat ->
+                ZoneStatCard(
+                    stat     = stat,
+                    settings = settings,
+                    onClick  = { selectedStat = stat },
+                )
+            }
+
+            HorizontalDivider(color = tc.surface, modifier = Modifier.padding(vertical = 4.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment     = Alignment.CenterVertically
+            ) {
+                Text(st.zones.zoneRoutesTitle, color = tc.textPrimary,
+                    fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                IconButton(onClick = { showRoutes = !showRoutes }) {
+                    Icon(
+                        if (showRoutes) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        null, tint = tc.muted
+                    )
+                }
+            }
+
+            if (showRoutes) {
+                routeStats.take(20).forEach { route ->
+                    RouteStatRow(route = route, settings = settings)
+                }
+            }
+        }
+
+        Spacer(Modifier.height(80.dp))
+    }
+
+    // ── Custom date range picker dialog ─────────────────────────────────
+    // ── Zone drill-down dialog ──────────────────────────────────────────
+    selectedStat?.let { stat ->
+        ZoneDrillDownDialog(
+            stat      = stat,
+            allZones  = zones,
+            settings  = settings,
+            onDismiss = { selectedStat = null },
+        )
+    }
+}
+
+@Composable
+private fun ZoneStatCard(
+    stat: ZoneStat,
+    settings: com.taxipro.data.db.AppSettings,
+    onClick: () -> Unit = {},
+) {
+    val tc    = LocalThemeColors.current
+    val st    = LocalStrings.current
+    val color = if (stat.zone != null) Color(stat.zone.color) else tc.muted
+
+    Card(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+        colors   = CardDefaults.cardColors(containerColor = tc.card),
+        shape    = RoundedCornerShape(12.dp),
+    ) {
+        Row(
+            Modifier.padding(12.dp),
+            verticalAlignment     = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Box(
+                Modifier
+                    .width(4.dp)
+                    .height(56.dp)
+                    .background(color, RoundedCornerShape(2.dp))
+            )
+            Column(Modifier.weight(1f)) {
+                Text(stat.zoneName, color = tc.textPrimary,
+                    fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(4.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    MiniZoneStat("${stat.pickupCount}",  st.zones.pickupsLabel,      tc.accent)
+                    MiniZoneStat("${stat.dropoffCount}", st.zones.dropoffsLabel,     tc.blue)
+                    MiniZoneStat(settings.formatPrice(stat.avgRevenue), st.zones.avgPickupFareLabel, tc.green)
+                    MiniZoneStat("%.1f km".format(stat.avgKm),          st.zones.avgPickupKmLabel,  tc.muted)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MiniZoneStat(value: String, label: String, color: Color) {
+    val tc = LocalThemeColors.current
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(value, color = color, fontSize = 13.sp,
+            fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+        Text(label, color = tc.muted, fontSize = 9.sp)
+    }
+}
+
+// ── Zone drill-down dialog ────────────────────────────────────────────────────
+
+@Composable
+private fun ZoneDrillDownDialog(
+    stat: ZoneStat,
+    allZones: List<Zone>,
+    settings: com.taxipro.data.db.AppSettings,
+    onDismiss: () -> Unit,
+) {
+    val tc    = LocalThemeColors.current
+    val st    = LocalStrings.current
+    val color = if (stat.zone != null) Color(stat.zone.color) else tc.muted
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties       = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnClickOutside   = true,
+        )
+    ) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(tc.background)
+        ) {
+            Column(Modifier.fillMaxSize()) {
+
+                // ── Header ────────────────────────────────────────────────
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(tc.card)
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.ArrowBack, null, tint = tc.accent)
+                    }
+                    Box(Modifier.size(12.dp).background(color, CircleShape))
+                    Spacer(Modifier.width(8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            stat.zoneName,
+                            color      = tc.textPrimary,
+                            fontSize   = 17.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Text(
+                            "${stat.pickupCount} ${st.zones.pickupsLabel.lowercase()}  •  " +
+                            "${stat.dropoffCount} ${st.zones.dropoffsLabel.lowercase()}",
+                            color    = tc.muted,
+                            fontSize = 11.sp,
+                        )
+                    }
+                }
+
+                // ── Scrollable content ────────────────────────────────────
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+
+                    // Pickups section
+                    DrillDownSectionHeader(
+                        label = st.zones.pickupsSection,
+                        count = stat.pickupCount,
+                        color = tc.accent,
+                    )
+                    if (stat.pickupRides.isEmpty()) {
+                        Text(
+                            st.zones.noPickupsInZone,
+                            color    = tc.muted,
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(start = 8.dp, bottom = 6.dp),
+                        )
+                    } else {
+                        stat.pickupRides.forEach { ride ->
+                            DrillDownRideCard(
+                                ride      = ride,
+                                allZones  = allZones,
+                                settings  = settings,
+                                isPickup  = true,
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(6.dp))
+
+                    // Dropoffs section
+                    DrillDownSectionHeader(
+                        label = st.zones.dropoffsSection,
+                        count = stat.dropoffCount,
+                        color = tc.blue,
+                    )
+                    if (stat.dropoffRides.isEmpty()) {
+                        Text(
+                            st.zones.noDropoffsInZone,
+                            color    = tc.muted,
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(start = 8.dp, bottom = 6.dp),
+                        )
+                    } else {
+                        stat.dropoffRides.forEach { ride ->
+                            DrillDownRideCard(
+                                ride      = ride,
+                                allZones  = allZones,
+                                settings  = settings,
+                                isPickup  = false,
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(80.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DrillDownSectionHeader(label: String, count: Int, color: Color) {
+    val tc = LocalThemeColors.current
+    Row(
+        verticalAlignment     = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier              = Modifier.padding(top = 4.dp, bottom = 2.dp),
+    ) {
+        Text(
+            label,
+            color      = tc.textPrimary,
+            fontSize   = 14.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        Box(
+            Modifier
+                .background(color.copy(alpha = 0.18f), RoundedCornerShape(20.dp))
+                .padding(horizontal = 8.dp, vertical = 2.dp)
+        ) {
+            Text("$count", color = color, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        }
+    }
+    HorizontalDivider(color = color.copy(alpha = 0.25f), thickness = 1.dp)
+}
+
+@Composable
+private fun DrillDownRideCard(
+    ride: com.taxipro.data.db.Ride,
+    allZones: List<Zone>,
+    settings: com.taxipro.data.db.AppSettings,
+    isPickup: Boolean,
+) {
+    val tc = LocalThemeColors.current
+    val st = LocalStrings.current
+
+    val (zoneLabel, addrLabel) = remember(ride, allZones) { rideRouteLabels(ride, allZones, st.zones.outsideZones) }
+
+    // Build directional label: for pickups show destination half, for dropoffs show origin half
+    val routeDisplay = when {
+        addrLabel.isNotEmpty() -> addrLabel
+        zoneLabel.isNotEmpty() -> zoneLabel
+        else                   -> "#${ride.id}"
+    }
+
+    // Duration
+    val durationSec  = if (ride.endTime > ride.startTime) (ride.endTime - ride.startTime) / 1000L else 0L
+    val durationText = when {
+        durationSec >= 3600 -> "%dh %02dm".format(durationSec / 3600, (durationSec % 3600) / 60)
+        durationSec >= 60   -> "%dm %02ds".format(durationSec / 60, durationSec % 60)
+        durationSec > 0     -> "${durationSec}s"
+        else                -> "—"
+    }
+
+    // Date label
+    val dateFmt  = remember { java.text.SimpleDateFormat("dd.MM  HH:mm", java.util.Locale.getDefault()) }
+    val dateText = remember(ride.startTime) { dateFmt.format(java.util.Date(ride.startTime)) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors   = CardDefaults.cardColors(containerColor = tc.card),
+        shape    = RoundedCornerShape(10.dp),
+        elevation = CardDefaults.cardElevation(0.dp),
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+
+            // Route label + date
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment     = Alignment.CenterVertically,
+            ) {
+                Row(
+                    verticalAlignment     = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier              = Modifier.weight(1f),
+                ) {
+                    Icon(
+                        if (isPickup) Icons.Default.ArrowUpward else Icons.Default.ArrowDownward,
+                        null,
+                        tint     = if (isPickup) tc.accent else tc.blue,
+                        modifier = Modifier.size(13.dp),
+                    )
+                    Text(
+                        routeDisplay,
+                        color      = tc.textPrimary,
+                        fontSize   = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines   = 1,
+                    )
+                }
+                Text(dateText, color = tc.muted, fontSize = 10.sp)
+            }
+
+            Spacer(Modifier.height(6.dp))
+
+            // Stats row
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                DrillStat(
+                    value = settings.formatPrice(ride.price + ride.tip),
+                    label = st.zones.fareLabel,
+                    color = tc.green,
+                )
+                DrillStat(
+                    value = "%.1f km".format(ride.kilometers),
+                    label = st.kilometersLabel,
+                    color = tc.muted,
+                )
+                DrillStat(
+                    value = durationText,
+                    label = st.durationField,
+                    color = tc.muted,
+                )
+                if (ride.tip > 0.0) {
+                    DrillStat(
+                        value = settings.formatPrice(ride.tip),
+                        label = st.tipLabel,
+                        color = tc.accent,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DrillStat(value: String, label: String, color: Color) {
+    val tc = LocalThemeColors.current
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            value,
+            color      = color,
+            fontSize   = 13.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.Monospace,
+        )
+        Text(label, color = tc.muted, fontSize = 9.sp)
+    }
+}
+
+// ── Route statistics row ──────────────────────────────────────────────────────
+
+@Composable
+private fun RouteStatRow(
+    route: ZoneRouteStat,
+    settings: com.taxipro.data.db.AppSettings,
+) {
+    val tc = LocalThemeColors.current
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 5.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment     = Alignment.CenterVertically,
+    ) {
+        Text(
+            "${route.fromZone}  →  ${route.toZone}",
+            color    = tc.textPrimary,
+            fontSize = 13.sp,
+            modifier = Modifier.weight(1f),
+        )
+        Column(horizontalAlignment = Alignment.End) {
+            Text("${route.count}×", color = tc.accent,
+                fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            Text("ø ${settings.formatPrice(route.avgRevenue)}",
+                color = tc.muted, fontSize = 11.sp)
+        }
+    }
+    HorizontalDivider(color = tc.surface, thickness = 0.5.dp)
+}

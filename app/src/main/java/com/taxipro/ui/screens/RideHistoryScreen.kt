@@ -8,6 +8,7 @@ import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -19,6 +20,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -84,6 +86,7 @@ fun RideHistoryScreen(vm: RideViewModel) {
         var expandedId    by remember { mutableStateOf<Long?>(null) }
         var pendingDelete by remember { mutableStateOf<(() -> Unit)?>(null) }
         var editRouteRide by remember { mutableStateOf<Ride?>(null) }
+        var editTipFareRide by remember { mutableStateOf<Ride?>(null) }
 
         if (isLoading) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -107,12 +110,13 @@ fun RideHistoryScreen(vm: RideViewModel) {
                         onDeleteRequest = { pendingDelete = { vm.deleteRide(ride) } }
                     ) {
                         HistoryRideCard(
-                            ride        = ride,
-                            zones       = allZones,
-                            isExpanded  = expandedId == ride.id,
-                            onToggle    = { expandedId = if (expandedId == ride.id) null else ride.id },
-                            onDelete    = { pendingDelete = { vm.deleteRide(ride) } },
-                            onEditRoute = { editRouteRide = ride },
+                            ride          = ride,
+                            zones         = allZones,
+                            isExpanded    = expandedId == ride.id,
+                            onToggle      = { expandedId = if (expandedId == ride.id) null else ride.id },
+                            onDelete      = { pendingDelete = { vm.deleteRide(ride) } },
+                            onEditRoute   = { editRouteRide = ride },
+                            onEditTipFare = { editTipFareRide = ride },
                         )
                     }
                 }
@@ -135,6 +139,17 @@ fun RideHistoryScreen(vm: RideViewModel) {
                 onDismiss = { editRouteRide = null },
             )
         }
+
+        editTipFareRide?.let { ride ->
+            EditTipFareDialog(
+                ride      = ride,
+                onSave    = { newPrice, newTip ->
+                    vm.updateRide(ride.copy(price = newPrice, tip = newTip))
+                    editTipFareRide = null
+                },
+                onDismiss = { editTipFareRide = null },
+            )
+        }
     }
 
 }
@@ -147,6 +162,7 @@ private fun HistoryRideCard(
     onToggle: () -> Unit,
     onDelete: () -> Unit,
     onEditRoute: () -> Unit,
+    onEditTipFare: () -> Unit,
 ) {
     val tc       = LocalThemeColors.current
     val st       = LocalStrings.current
@@ -261,6 +277,12 @@ private fun HistoryRideCard(
                     text        = { Text(st.history.editRouteLabel, color = tc.accent) },
                     leadingIcon = { Icon(Icons.Default.Directions, null, tint = tc.accent) },
                     onClick     = { showMenu = false; onEditRoute() },
+                )
+                HorizontalDivider(color = tc.surface, thickness = 0.5.dp)
+                DropdownMenuItem(
+                    text        = { Text(st.history.editFareTipLabel, color = tc.accent) },
+                    leadingIcon = { Icon(Icons.Default.Edit, null, tint = tc.accent) },
+                    onClick     = { showMenu = false; onEditTipFare() },
                 )
                 HorizontalDivider(color = tc.surface, thickness = 0.5.dp)
                 DropdownMenuItem(
@@ -418,6 +440,96 @@ fun DeleteConfirmDialog(
                 Text(st.cancelBtn, color = tc.muted)
             }
         },
+    )
+}
+
+@Composable
+private fun EditTipFareDialog(
+    ride: Ride,
+    onSave: (newPrice: Double, newTip: Double) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    val st = LocalStrings.current
+    val settings = LocalSettings.current
+
+    var priceText by remember {
+        mutableStateOf(
+            if (ride.price == ride.price.toLong().toDouble())
+                ride.price.toLong().toString()
+            else "%.2f".format(ride.price)
+        )
+    }
+    var tipText by remember {
+        mutableStateOf(
+            if (ride.tip == ride.tip.toLong().toDouble())
+                ride.tip.toLong().toString()
+            else "%.2f".format(ride.tip)
+        )
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor   = tc.card,
+        title = {
+            Text(
+                st.history.editFareTipLabel,
+                color = tc.textPrimary, fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                // Fare field
+                OutlinedTextField(
+                    value         = priceText,
+                    onValueChange = { priceText = it },
+                    label         = { Text("${st.history.fareLabel} (${settings.currency.symbol})", color = tc.muted) },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    singleLine    = true,
+                    colors        = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor   = tc.accent,
+                        unfocusedBorderColor = tc.surface,
+                        focusedTextColor     = tc.textPrimary,
+                        unfocusedTextColor   = tc.textPrimary,
+                        cursorColor          = tc.accent,
+                        focusedLabelColor    = tc.accent,
+                    )
+                )
+                // Tip field
+                OutlinedTextField(
+                    value         = tipText,
+                    onValueChange = { tipText = it },
+                    label         = { Text("${st.tipLabel} (${settings.currency.symbol})", color = tc.muted) },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    singleLine    = true,
+                    colors        = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor   = tc.purple,
+                        unfocusedBorderColor = tc.surface,
+                        focusedTextColor     = tc.textPrimary,
+                        unfocusedTextColor   = tc.textPrimary,
+                        cursorColor          = tc.purple,
+                        focusedLabelColor    = tc.purple,
+                    )
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val newPrice = priceText.replace(",", ".").toDoubleOrNull() ?: ride.price
+                    val newTip   = tipText.replace(",", ".").toDoubleOrNull()   ?: ride.tip
+                    onSave(newPrice, newTip)
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = tc.accent),
+            ) {
+                Text(st.saveBtn, color = tc.background, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(st.cancelBtn, color = tc.muted)
+            }
+        }
     )
 }
 

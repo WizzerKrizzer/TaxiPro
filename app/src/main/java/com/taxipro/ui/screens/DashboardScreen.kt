@@ -24,6 +24,7 @@ import java.util.*
 
 @Composable
 fun DashboardScreen(vm: RideViewModel) {
+    val tc       = LocalThemeColors.current
     val allRides by vm.allRides.collectAsState(initial = emptyList())
     val st       = LocalStrings.current
     val settings = LocalSettings.current
@@ -46,6 +47,9 @@ fun DashboardScreen(vm: RideViewModel) {
     val todayKm       = todayRides.sumOf { it.kilometers }
     val todayTip      = todayRides.sumOf { it.tip }
     val avgPerRide    = if (allRides.isNotEmpty()) allRides.sumOf { it.price } / allRides.size else 0.0
+    val todayNetProfit = todayRides.sumOf { ride ->
+        ride.price - ride.price * ride.taxPercent / 100.0 - ride.kilometers * ride.fuelCostPerKm
+    }
 
     val dateLocale = if (settings.language == AppLanguage.BG) Locale("bg") else Locale.ENGLISH
     val sdf = SimpleDateFormat("dd MMMM yyyy", dateLocale)
@@ -54,7 +58,7 @@ fun DashboardScreen(vm: RideViewModel) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Dark)
+            .background(tc.background)
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -62,22 +66,22 @@ fun DashboardScreen(vm: RideViewModel) {
         // ── Header ──
         Card(
             modifier = Modifier.fillMaxWidth(),
-            colors   = CardDefaults.cardColors(containerColor = Color(0xFF161A22)),
+            colors   = CardDefaults.cardColors(containerColor = tc.card),
             shape    = RoundedCornerShape(16.dp)
         ) {
             Box(Modifier.padding(20.dp)) {
                 Column {
-                    Text(today_str.uppercase(), color = Muted, fontSize = 11.sp, letterSpacing = 1.sp)
+                    Text(today_str.uppercase(), color = tc.muted, fontSize = 11.sp, letterSpacing = 1.sp)
                     Spacer(Modifier.height(6.dp))
-                    Text(st.goodDay, color = Color.White,
+                    Text(st.goodDay, color = tc.textPrimary,
                         fontSize = 20.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(16.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-                        DashStat(settings.formatPrice(todayRevenue), st.todayLabel, Gold)
+                        DashStat(settings.formatPrice(todayRevenue), st.todayLabel, tc.accent)
                         VertDivider()
-                        DashStat("${todayRides.size}", st.ridesLabel, Green)
+                        DashStat("${todayRides.size}", st.ridesLabel, tc.green)
                         VertDivider()
-                        DashStat("%.1f".format(todayKm), settings.distanceUnit.shortLabel, Color(0xFF4A9EFF))
+                        DashStat("%.1f".format(todayKm), settings.distanceUnit.shortLabel, tc.blue)
                     }
                 }
             }
@@ -86,20 +90,20 @@ fun DashboardScreen(vm: RideViewModel) {
         // ── 4 карти ──
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             DashCard(st.monthlyRevenue, settings.formatPrice(monthRevenue),
-                "${monthRides.size} ${st.ridesLabel}", Gold, Icons.Default.TrendingUp, Modifier.weight(1f))
+                "${monthRides.size} ${st.ridesLabel}", tc.accent, Icons.Default.TrendingUp, Modifier.weight(1f))
             DashCard(st.avgRide, settings.formatPrice(avgPerRide),
-                st.perRide, Green, Icons.Default.ShowChart, Modifier.weight(1f))
+                st.perRide, tc.green, Icons.Default.ShowChart, Modifier.weight(1f))
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             DashCard(st.tipsToday, settings.formatPrice(todayTip),
-                st.received, Color(0xFFA78BFA), Icons.Default.Favorite, Modifier.weight(1f))
-            DashCard(st.netProfit, settings.formatPrice(todayRevenue * 0.85),
-                st.afterCosts, Color(0xFF4A9EFF), Icons.Default.AccountBalance, Modifier.weight(1f))
+                st.received, tc.purple, Icons.Default.Favorite, Modifier.weight(1f))
+            DashCard(st.netProfit, settings.formatPrice(todayNetProfit),
+                st.afterCosts, tc.blue, Icons.Default.AccountBalance, Modifier.weight(1f))
         }
 
         // ── Последни курсове ──
         if (allRides.isNotEmpty()) {
-            Text(st.recentRides, color = Muted, fontSize = 11.sp,
+            Text(st.recentRides, color = tc.muted, fontSize = 11.sp,
                 letterSpacing = 1.sp, fontWeight = FontWeight.Bold)
 
             allRides.take(5).forEach { ride ->
@@ -113,39 +117,43 @@ fun DashboardScreen(vm: RideViewModel) {
 
 @Composable
 fun DashStat(value: String, label: String, color: Color) {
+    val tc = LocalThemeColors.current
     Column {
         Text(value, color = color, fontSize = 24.sp,
             fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
-        Text(label, color = Muted, fontSize = 11.sp)
+        Text(label, color = tc.muted, fontSize = 11.sp)
     }
 }
 
 @Composable
 fun VertDivider() {
-    Box(Modifier.width(1.dp).height(40.dp).background(Color(0xFF1E2430)))
+    val tc = LocalThemeColors.current
+    Box(Modifier.width(1.dp).height(40.dp).background(tc.surface))
 }
 
 @Composable
 fun DashCard(label: String, value: String, sub: String, color: Color,
              icon: ImageVector, modifier: Modifier = Modifier) {
-    Card(modifier = modifier, colors = CardDefaults.cardColors(containerColor = Color(0xFF161A22)),
+    val tc = LocalThemeColors.current
+    Card(modifier = modifier, colors = CardDefaults.cardColors(containerColor = tc.card),
         shape = RoundedCornerShape(14.dp)) {
         Column(Modifier.padding(14.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(label, color = Muted, fontSize = 10.sp,
+                Text(label, color = tc.muted, fontSize = 10.sp,
                     letterSpacing = 1.sp, fontWeight = FontWeight.SemiBold)
                 Icon(icon, null, tint = color, modifier = Modifier.size(16.dp))
             }
             Spacer(Modifier.height(8.dp))
             Text(value, color = color, fontSize = 20.sp,
                 fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
-            Text(sub, color = Muted, fontSize = 10.sp)
+            Text(sub, color = tc.muted, fontSize = 10.sp)
         }
     }
 }
 
 @Composable
 fun RecentRideCard(ride: Ride) {
+    val tc       = LocalThemeColors.current
     val st       = LocalStrings.current
     val settings = LocalSettings.current
     val sdf   = SimpleDateFormat("HH:mm", Locale.getDefault())
@@ -162,7 +170,7 @@ fun RecentRideCard(ride: Ride) {
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors   = CardDefaults.cardColors(containerColor = Color(0xFF161A22)),
+        colors   = CardDefaults.cardColors(containerColor = tc.card),
         shape    = RoundedCornerShape(12.dp)
     ) {
         Column(Modifier.padding(14.dp)) {
@@ -178,16 +186,16 @@ fun RecentRideCard(ride: Ride) {
                 ) {
                     Box(
                         Modifier.size(36.dp)
-                            .background(Color(0xFFF5C84220), RoundedCornerShape(8.dp)),
+                            .background(tc.accent.copy(alpha = 0.13f), RoundedCornerShape(8.dp)),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("#${ride.globalId}", color = Gold,
+                        Text("#${ride.globalId}", color = tc.accent,
                             fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
                     Column(Modifier.weight(1f)) {
                         Text(
                             routeLabel,
-                            color    = Color.White,
+                            color    = tc.textPrimary,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
@@ -195,7 +203,7 @@ fun RecentRideCard(ride: Ride) {
                         )
                         Text(
                             "$start – $end • %.1f ${settings.distanceUnit.shortLabel}".format(ride.kilometers),
-                            color = Muted, fontSize = 11.sp
+                            color = tc.muted, fontSize = 11.sp
                         )
                     }
                 }
@@ -203,14 +211,14 @@ fun RecentRideCard(ride: Ride) {
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
                         settings.formatPrice(ride.price),
-                        color      = Gold,
+                        color      = tc.accent,
                         fontSize   = 16.sp,
                         fontWeight = FontWeight.Bold,
                         fontFamily = FontFamily.Monospace
                     )
                     if (ride.tip > 0)
                         Text("+%.2f ${st.tipBadge}".format(ride.tip),
-                            color = Color(0xFFA78BFA), fontSize = 10.sp)
+                            color = tc.purple, fontSize = 10.sp)
                 }
             }
         }
@@ -219,8 +227,9 @@ fun RecentRideCard(ride: Ride) {
 
 @Composable
 fun EmptyState(text: String) {
+    val tc = LocalThemeColors.current
     Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
-        Text(text, color = Muted, fontSize = 14.sp,
+        Text(text, color = tc.muted, fontSize = 14.sp,
             textAlign = androidx.compose.ui.text.style.TextAlign.Center)
     }
 }

@@ -201,6 +201,13 @@ if "$cygwin" || "$msys" ; then
 fi
 
 
+# Fix for Java 21 + Windows: Unix domain socket pipe fails when TEMP path is too long
+mkdir -p "C:/tmp" 2>/dev/null || true
+export TEMP="C:\\tmp"
+export TMP="C:\\tmp"
+export TMPDIR="/c/tmp"
+export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS} -Djava.io.tmpdir=C:\\tmp"
+
 # Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
 DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'
 
