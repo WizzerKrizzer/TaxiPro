@@ -220,6 +220,31 @@ enum class AppLanguage(val code: String, val displayName: String) {
 
 // ── AppSettings data class ───────────────────────────────────────
 
+fun isImplementedLanguage(language: AppLanguage): Boolean = when (language) {
+    AppLanguage.EN,
+    AppLanguage.ES,
+    AppLanguage.PT,
+    AppLanguage.RU,
+    AppLanguage.FR,
+    AppLanguage.HI,
+    AppLanguage.ZH,
+    AppLanguage.AR,
+    AppLanguage.DE,
+    AppLanguage.JA,
+    AppLanguage.TR,
+    AppLanguage.KO,
+    AppLanguage.VI,
+    AppLanguage.ID,
+    AppLanguage.IT,
+    AppLanguage.BG -> true
+}
+
+fun resolveDeviceAppLanguage(locale: Locale = Locale.getDefault()): AppLanguage {
+    val code = locale.language.lowercase(Locale.ROOT)
+    val resolved = AppLanguage.entries.firstOrNull { it.code == code } ?: AppLanguage.EN
+    return if (isImplementedLanguage(resolved)) resolved else AppLanguage.EN
+}
+
 data class AppSettings(
     val startFee: Double              = 0.0,
     val pricePerKm: Double            = 0.0,
@@ -291,8 +316,10 @@ class SettingsRepository(private val context: Context) {
             waitSpeedThresholdKmh = p[Keys.WAIT_THRESHOLD] ?: 0.0,
             gpsIntervalMs         = p[Keys.GPS_INTERVAL]   ?: 1000L,
             gpsMinDistanceM       = p[Keys.GPS_DISTANCE]   ?: 5f,
-            language              = AppLanguage.entries.firstOrNull {
-                it.code == p[Keys.LANGUAGE] } ?: AppLanguage.EN,
+            language              = p[Keys.LANGUAGE]
+                ?.let { savedCode -> AppLanguage.entries.firstOrNull { it.code == savedCode } }
+                ?.takeIf(::isImplementedLanguage)
+                ?: resolveDeviceAppLanguage(),
             distanceUnit          = if (p[Keys.DISTANCE_UNIT] == "MILES")
                 DistanceUnit.MILES else DistanceUnit.KM,
             theme                 = AppTheme.from(p[Keys.THEME] ?: "DARK"),

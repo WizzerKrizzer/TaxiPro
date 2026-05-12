@@ -17,12 +17,26 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.taxipro.data.db.Ride
 import com.taxipro.data.db.Shift
+import com.taxipro.data.db.Zone
+import com.taxipro.data.db.ZoneStat
+import com.taxipro.data.db.ZoneWaitSession
+import com.taxipro.data.db.computeZoneStats
 import com.taxipro.data.db.formatPrice
+import com.taxipro.data.db.longestZoneWait
 import com.taxipro.ui.theme.LocalSettings
 import com.taxipro.ui.theme.LocalStrings
 import com.taxipro.ui.viewmodel.RideViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.*
+
+private fun formatDurationForSummary(totalMs: Long): String {
+    val totalMinutes = (totalMs / 60_000L).coerceAtLeast(0L)
+    val hours = totalMinutes / 60
+    val minutes = totalMinutes % 60
+    return if (hours > 0) "${hours}ч ${minutes}м" else "${minutes}м"
+}
 
 @Composable
 fun ShiftSummaryScreen(
@@ -31,11 +45,19 @@ fun ShiftSummaryScreen(
     onDismiss: () -> Unit,
 ) {
     val rides by rideVm.getRidesByShift(shift.id).collectAsState(initial = emptyList())
-    ShiftSummaryContent(shift = shift, rides = rides, onDismiss = onDismiss)
+    val zones by rideVm.allZones.collectAsState(initial = emptyList())
+    val zoneWaits by rideVm.getZoneWaitsByShift(shift.id).collectAsState(initial = emptyList())
+    ShiftSummaryContent(shift = shift, rides = rides, zones = zones, zoneWaits = zoneWaits, onDismiss = onDismiss)
 }
 
 @Composable
-fun ShiftSummaryContent(shift: Shift, rides: List<Ride>, onDismiss: () -> Unit) {
+fun ShiftSummaryContent(
+    shift: Shift,
+    rides: List<Ride>,
+    zones: List<Zone> = emptyList(),
+    zoneWaits: List<ZoneWaitSession> = emptyList(),
+    onDismiss: () -> Unit,
+) {
     val tc       = LocalThemeColors.current
     val st       = LocalStrings.current
     val settings = LocalSettings.current
@@ -66,6 +88,7 @@ fun ShiftSummaryContent(shift: Shift, rides: List<Ride>, onDismiss: () -> Unit) 
     val avgTaxRate   = if (totalRevenue > 0) taxCost / totalRevenue * 100.0 else 0.0
     val fuelRowLabel = "${st.fuelLabel} (~%.2f/${settings.distanceUnit.shortLabel})".format(avgFuelRate)
     val taxRowLabel  = "${st.taxInsurance} (~%.1f%%)".format(avgTaxRate)
+    val longestZoneWait = remember(zoneWaits) { zoneWaits.longestZoneWait() }
 
     val durStr = buildString {
         if (durationH > 0) append("${durationH}${st.hoursAbbr} ")
@@ -182,6 +205,35 @@ fun ShiftSummaryContent(shift: Shift, rides: List<Ride>, onDismiss: () -> Unit) 
             }
         }
 
+        // ── Zone breakdown ───────────────────────────────────
+        ShiftZoneStatsSection(rides = rides, zones = zones)
+
+        longestZoneWait?.let { wait ->
+            StatsSection("Чакане в зона") {
+                Row(
+                    Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(wait.zoneName, color = tc.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "${sdf.format(Date(wait.startTime))} - ${sdf.format(Date(wait.endTime))}",
+                            color = tc.muted,
+                            fontSize = 11.sp,
+                        )
+                    }
+                    Text(
+                        formatDurationForSummary(wait.durationMs),
+                        color = tc.accent,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            }
+        }
+
         // ── Ride list ────────────────────────────────────────
         if (rides.isNotEmpty()) {
             StatsSection(st.ridesInShift) {
@@ -253,6 +305,112 @@ fun ShiftSummaryContent(shift: Shift, rides: List<Ride>, onDismiss: () -> Unit) 
             Text(st.doneBtn, color = tc.background, fontSize = 16.sp, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.height(80.dp))
+    }
+}
+
+// ── Zone breakdown for a shift ───────────────────────────────
+@Composable
+fun ShiftZoneStatsSection(rides: List<Ride>, zones: List<Zone>) {
+    val tc = LocalThemeColors.current
+    val st = LocalStrings.current
+
+    if (zones.isEmpty() || rides.isEmpty()) return
+
+    var zoneStats by remember { mutableStateOf<List<ZoneStat>>(emptyList()) }
+
+    LaunchedEffect(rides, zones) {
+        val (stats, _) = withContext(Dispatchers.Default) {
+            computeZoneStats(rides, zones, st.zones.outsideZones)
+        }
+        // Exclude "outside zones" entries for the top-3 highlights
+        zoneStats = stats.filter { it.zone != null }
+    }
+
+    if (zoneStats.isEmpty()) return
+
+    val topPickup  = zoneStats.maxByOrNull { it.pickupCount }  ?: return
+    val topDropoff = zoneStats.maxByOrNull { it.dropoffCount } ?: return
+    val topRevenue = zoneStats.maxByOrNull { it.avgRevenue }   ?: return
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors   = CardDefaults.cardColors(containerColor = tc.card),
+        shape    = RoundedCornerShape(14.dp),
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            // Header
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment     = Alignment.CenterVertically,
+            ) {
+                Text(
+                    st.zones.shiftZoneStatsTitle,
+                    color      = tc.textPrimary,
+                    fontSize   = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Icon(Icons.Default.Place, null, tint = tc.accent, modifier = Modifier.size(16.dp))
+            }
+            Spacer(Modifier.height(8.dp))
+
+            ZoneHighlightRow(
+                icon       = Icons.Default.ArrowUpward,
+                iconColor  = tc.accent,
+                label      = st.zones.topPickupZone,
+                zoneName   = topPickup.zoneName,
+                zoneColor  = Color(topPickup.zone!!.color),
+                statText   = "${topPickup.pickupCount} ${st.zones.timesLabel}",
+            )
+            HorizontalDivider(color = tc.surface, thickness = 0.5.dp)
+            ZoneHighlightRow(
+                icon       = Icons.Default.ArrowDownward,
+                iconColor  = tc.blue,
+                label      = st.zones.topDropoffZone,
+                zoneName   = topDropoff.zoneName,
+                zoneColor  = Color(topDropoff.zone!!.color),
+                statText   = "${topDropoff.dropoffCount} ${st.zones.timesLabel}",
+            )
+            HorizontalDivider(color = tc.surface, thickness = 0.5.dp)
+            ZoneHighlightRow(
+                icon       = Icons.Default.TrendingUp,
+                iconColor  = tc.green,
+                label      = st.zones.mostProfitableZone,
+                zoneName   = topRevenue.zoneName,
+                zoneColor  = Color(topRevenue.zone!!.color),
+                statText   = "${st.zones.avgFareLabel}: ${LocalSettings.current.formatPrice(topRevenue.avgRevenue)}",
+            )
+        }
+    }
+}
+
+@Composable
+private fun ZoneHighlightRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    iconColor: Color,
+    label: String,
+    zoneName: String,
+    zoneColor: Color,
+    statText: String,
+) {
+    val tc = LocalThemeColors.current
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        verticalAlignment     = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Icon(icon, null, tint = iconColor, modifier = Modifier.size(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text(label, color = tc.muted, fontSize = 10.sp)
+            Row(
+                verticalAlignment     = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                Box(Modifier.size(8.dp).background(zoneColor, RoundedCornerShape(2.dp)))
+                Text(zoneName, color = tc.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
+        Text(statText, color = tc.muted, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
     }
 }
 

@@ -98,6 +98,29 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
             onResume = { vm.resumeShift() },
         )
 
+        // ── Shift earnings chart (shown when riding or rides exist) ──────
+        activeShift?.let { shift ->
+            val shiftRides = remember(allRides, shift.id) {
+                allRides.filter { it.shiftId == shift.id && it.endTime > 0 }
+            }
+            val chartScale   by rideVm.chartScale.collectAsState()
+            val avgShiftHours by rideVm.avgShiftHours.collectAsState()
+            if (shiftRides.isNotEmpty() || state.isTracking) {
+                ShiftEarningsChart(
+                    rides                 = shiftRides,
+                    waitSessions          = emptyList(),
+                    shiftStartMs          = shift.startTime,
+                    shiftEndMs            = System.currentTimeMillis(),
+                    accentColor           = tc.accent,
+                    yAxisScale            = chartScale,
+                    currentPrice          = if (state.isTracking) finalPrice else 0.0,
+                    currentRideStartMs    = state.startTime,
+                    isRideActive          = state.isTracking,
+                    expectedDurationHours = avgShiftHours,
+                )
+            }
+        }
+
         // ── Тарифа избор ──
         if (!state.isTracking) {
             if (tariffs.isNotEmpty()) {

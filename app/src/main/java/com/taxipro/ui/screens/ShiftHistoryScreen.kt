@@ -30,6 +30,7 @@ import com.taxipro.data.db.Ride
 import com.taxipro.data.db.Shift
 import com.taxipro.data.db.Zone
 import com.taxipro.data.db.formatPrice
+import com.taxipro.data.db.longestZoneWait
 import com.taxipro.data.db.rideRouteLabels
 import com.taxipro.ui.theme.LocalSettings
 import com.taxipro.ui.theme.LocalStrings
@@ -60,6 +61,13 @@ private fun parseRideRouteJson(json: String): List<LatLng> {
         .findAll(json)
         .map { LatLng(it.groupValues[1].toDouble(), it.groupValues[2].toDouble()) }
         .toList()
+}
+
+private fun formatDurationForShiftHistory(totalMs: Long): String {
+    val totalMinutes = (totalMs / 60_000L).coerceAtLeast(0L)
+    val hours = totalMinutes / 60
+    val minutes = totalMinutes % 60
+    return if (hours > 0) "${hours}ч ${minutes}м" else "${minutes}м"
 }
 
 
@@ -309,7 +317,13 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewMo
     var pendingDelete by remember { mutableStateOf<(() -> Unit)?>(null) }
     var showMap       by remember { mutableStateOf(false) }
     var showDetail    by remember { mutableStateOf(false) }
+    var showGate      by remember { mutableStateOf(false) }
+    var selectedRide  by remember { mutableStateOf<Ride?>(null) }
     val zones         by rideVm.allZones.collectAsState(initial = emptyList())
+    val zoneWaits     by rideVm.getZoneWaitsByShift(shift.id).collectAsState(initial = emptyList())
+    val chartScale    by rideVm.chartScale.collectAsState()
+    val isPremium      = LocalIsPremium.current
+    val onUpgrade      = LocalOnUpgrade.current
 
     val totalRevenue = rides.sumOf { it.price }
     val totalTips    = rides.sumOf { it.tip }
@@ -322,6 +336,7 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewMo
     val fuelCost     = shiftKm * avgFuelCostPerKm
     val taxCost      = rides.sumOf { it.price * it.taxPercent / 100.0 }
     val netProfit    = totalRevenue - fuelCost - taxCost
+    val longestZoneWait = remember(zoneWaits) { zoneWaits.longestZoneWait() }
 
     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(
@@ -334,7 +349,7 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewMo
             MiniStat(st.profitLabel,  settings.formatPrice(netProfit),  tc.green)
             // Map button
             IconButton(
-                onClick  = { showMap = true },
+                onClick  = { if (isPremium) showMap = true else showGate = true },
                 modifier = Modifier
                     .size(36.dp)
                     .background(tc.accent.copy(alpha = 0.12f), RoundedCornerShape(8.dp))
@@ -344,6 +359,53 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewMo
         }
 
         HorizontalDivider(color = tc.muted.copy(alpha = 0.15f))
+
+        // ── Earnings timeline chart ──────────────────────────
+        if (rides.isNotEmpty()) {
+            val actualDurationHours = if (shift.endTime > 0)
+                (shift.endTime - shift.startTime) / 3_600_000.0
+            else 8.0
+            ShiftEarningsChart(
+                rides                 = rides,
+                waitSessions          = zoneWaits,
+                shiftStartMs          = shift.startTime,
+                shiftEndMs            = if (shift.endTime > 0) shift.endTime
+                                        else System.currentTimeMillis(),
+                accentColor           = tc.accent,
+                yAxisScale            = chartScale,
+                expectedDurationHours = actualDurationHours,
+                useActualShiftScale   = shift.endTime > 0,
+            )
+        }
+
+        longestZoneWait?.let { wait ->
+            Card(
+                colors = CardDefaults.cardColors(containerColor = tc.cardAlt.copy(alpha = 0.55f)),
+                shape = RoundedCornerShape(10.dp),
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Най-дълго чакане в зона", color = tc.textPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "${wait.zoneName}  •  ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(wait.startTime))} - ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(wait.endTime))}",
+                            color = tc.muted,
+                            fontSize = 10.sp,
+                        )
+                    }
+                    Text(
+                        formatDurationForShiftHistory(wait.durationMs),
+                        color = tc.accent,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            }
+        }
 
         if (rides.isEmpty()) {
             Text(st.noRidesInShift, color = tc.muted, fontSize = 12.sp)
@@ -408,10 +470,15 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewMo
                     Row(
                         Modifier
                             .fillMaxWidth()
+                            .background(tc.cardAlt.copy(alpha = 0.42f), RoundedCornerShape(8.dp))
+                            .border(1.dp, tc.accent.copy(alpha = 0.10f), RoundedCornerShape(8.dp))
                             .pointerInput(Unit) {
-                                detectTapGestures(onLongPress = { showRideMenu = true })
+                                detectTapGestures(
+                                    onTap       = { selectedRide = ride },
+                                    onLongPress = { showRideMenu = true },
+                                )
                             }
-                            .padding(vertical = 4.dp),
+                            .padding(horizontal = 8.dp, vertical = 7.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment     = Alignment.Top,
                     ) {
@@ -457,6 +524,13 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewMo
                             fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace,
                             modifier = Modifier.padding(top = 2.dp)
                         )
+                        Spacer(Modifier.width(4.dp))
+                        Icon(
+                            Icons.Default.ChevronRight,
+                            null,
+                            tint = tc.muted.copy(alpha = 0.75f),
+                            modifier = Modifier.size(18.dp).padding(top = 2.dp),
+                        )
                     }
                     DropdownMenu(
                         expanded         = showRideMenu,
@@ -471,7 +545,7 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewMo
                     }
                 }
                 if (idx < sortedRides.lastIndex)
-                    HorizontalDivider(color = tc.muted.copy(alpha = 0.1f))
+                    Spacer(Modifier.height(6.dp))
             }
         }
     }
@@ -482,7 +556,7 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewMo
         HorizontalDivider(color = tc.muted.copy(alpha = 0.15f))
         Spacer(Modifier.height(4.dp))
         Button(
-            onClick  = { showDetail = true },
+            onClick  = { if (isPremium) showDetail = true else showGate = true },
             modifier = Modifier.fillMaxWidth(),
             colors   = ButtonDefaults.buttonColors(
                 containerColor = tc.accent.copy(alpha = 0.15f),
@@ -501,7 +575,22 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewMo
         ShiftMapDialog(shift = shift, rides = rides, onDismiss = { showMap = false })
     }
     if (showDetail) {
-        ShiftDetailDialog(shift = shift, rides = rides, zones = zones, onDismiss = { showDetail = false })
+        ShiftDetailDialog(shift = shift, rides = rides, zones = zones, rideVm = rideVm, onDismiss = { showDetail = false })
+    }
+    selectedRide?.let { ride ->
+        ZoneRideDetailDialog(
+            ride      = ride,
+            allShifts = listOf(shift),
+            settings  = settings,
+            onDismiss = { selectedRide = null },
+        )
+    }
+    if (showGate) {
+        PremiumUpgradeDialog(
+            hint      = st.premium.gateHintDetail,
+            onUpgrade = { showGate = false; onUpgrade() },
+            onDismiss = { showGate = false },
+        )
     }
 
     pendingDelete?.let { action ->
@@ -742,12 +831,13 @@ private fun MiniStat(label: String, value: String, color: Color) {
 // ── Shift Detail Dialog ──────────────────────────────────────────
 
 @Composable
-private fun ShiftDetailDialog(shift: Shift, rides: List<Ride>, zones: List<Zone>, onDismiss: () -> Unit) {
+private fun ShiftDetailDialog(shift: Shift, rides: List<Ride>, zones: List<Zone>, rideVm: RideViewModel, onDismiss: () -> Unit) {
     val tc       = LocalThemeColors.current
     val st       = LocalStrings.current
     val settings = LocalSettings.current
     val sdfDate  = SimpleDateFormat("dd.MM.yyyy", Locale.getDefault())
     val sdfTime  = SimpleDateFormat("HH:mm",       Locale.getDefault())
+    var selectedRide by remember { mutableStateOf<Ride?>(null) }
 
     // ── Computed values ──────────────────────────────────────
     val sortedRides   = remember(rides) { rides.sortedBy { it.startTime } }
@@ -845,6 +935,28 @@ private fun ShiftDetailDialog(shift: Shift, rides: List<Ride>, zones: List<Zone>
 
                 Spacer(Modifier.height(12.dp))
 
+                // ── Earnings timeline chart ──────────────────────
+                val chartScale by rideVm.chartScale.collectAsState()
+                if (sortedRides.isNotEmpty()) {
+                    // Use the actual shift duration for completed shifts (better X-axis fit)
+                    val actualDurationHours = if (shift.endTime > 0)
+                        (shift.endTime - shift.startTime) / 3_600_000.0
+                    else 8.0
+                    Box(Modifier.padding(horizontal = 12.dp).fillMaxWidth()) {
+                        ShiftEarningsChart(
+                            rides                 = sortedRides,
+                            shiftStartMs          = shift.startTime,
+                            shiftEndMs            = if (shift.endTime > 0) shift.endTime
+                                                    else System.currentTimeMillis(),
+                            accentColor           = tc.accent,
+                            yAxisScale            = chartScale,
+                            expectedDurationHours = actualDurationHours,
+                            useActualShiftScale   = shift.endTime > 0,
+                        )
+                    }
+                    Spacer(Modifier.height(10.dp))
+                }
+
                 // ── Financial summary ────────────────────────────
                 DetailSection(st.detail.financialSection, tc) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
@@ -864,6 +976,11 @@ private fun ShiftDetailDialog(shift: Shift, rides: List<Ride>, zones: List<Zone>
                         DetailStat(settings.formatPrice(netProfit),      st.netProfit,       tc.green, tc)
                     }
                 }
+
+                Spacer(Modifier.height(10.dp))
+
+                // ── Zone breakdown ───────────────────────────────
+                ShiftZoneStatsSection(rides = rides, zones = zones)
 
                 Spacer(Modifier.height(10.dp))
 
@@ -925,7 +1042,12 @@ private fun ShiftDetailDialog(shift: Shift, rides: List<Ride>, zones: List<Zone>
                         }
 
                         Row(
-                            Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                            Modifier
+                                .fillMaxWidth()
+                                .background(tc.cardAlt.copy(alpha = 0.34f), RoundedCornerShape(10.dp))
+                                .border(1.dp, tc.accent.copy(alpha = 0.10f), RoundedCornerShape(10.dp))
+                                .clickable { selectedRide = ride }
+                                .padding(horizontal = 8.dp, vertical = 8.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment     = Alignment.Top,
                         ) {
@@ -1013,14 +1135,30 @@ private fun ShiftDetailDialog(shift: Shift, rides: List<Ride>, zones: List<Zone>
                                     )
                                 }
                             }
+                            Spacer(Modifier.width(4.dp))
+                            Icon(
+                                Icons.Default.ChevronRight,
+                                null,
+                                tint = tc.muted.copy(alpha = 0.75f),
+                                modifier = Modifier.size(18.dp),
+                            )
                         }
 
                         if (idx < sortedRides.lastIndex)
-                            HorizontalDivider(color = tc.muted.copy(alpha = 0.1f))
+                            Spacer(Modifier.height(6.dp))
                     }
                 }
             }
         }
+    }
+
+    selectedRide?.let { ride ->
+        ZoneRideDetailDialog(
+            ride      = ride,
+            allShifts = listOf(shift),
+            settings  = settings,
+            onDismiss = { selectedRide = null },
+        )
     }
 }
 

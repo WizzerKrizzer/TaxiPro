@@ -73,6 +73,7 @@ class TrackingViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearAllData() = viewModelScope.launch {
         db.rideDao().deleteAll()
+        db.zoneWaitDao().deleteAll()
         db.shiftDao().deleteAll()
         db.tariffDao().deleteAll()
         db.tariffExpenseDao().deleteAll()
@@ -120,11 +121,11 @@ class TrackingViewModel(app: Application) : AndroidViewModel(app) {
     fun startShift() = viewModelScope.launch {
         val dao   = db.shiftDao()
         val count = dao.getTotalCount()
-        dao.insertShift(Shift(shiftNumber = count + 1))
+        val shiftId = dao.insertShift(Shift(shiftNumber = count + 1))
         // Reset shift km counter and pause state, start shift-level GPS tracking
         _state.update { it.copy(shiftTotalKm = 0.0, isShiftPaused = false, shiftPausedMs = 0L) }
         shiftPauseStartMs = 0L
-        sendAction(GpsTrackingService.ACTION_SHIFT_START)
+        sendAction(GpsTrackingService.ACTION_SHIFT_START, shiftId)
     }
 
     fun endShift() = viewModelScope.launch {
@@ -136,7 +137,7 @@ class TrackingViewModel(app: Application) : AndroidViewModel(app) {
             totalKm  = _state.value.shiftTotalKm,
         )
         dao.updateShift(ended)
-        sendAction(GpsTrackingService.ACTION_SHIFT_STOP)
+        sendAction(GpsTrackingService.ACTION_SHIFT_STOP, active.id)
         _lastEndedShift.value = ended
     }
 
@@ -332,8 +333,11 @@ class TrackingViewModel(app: Application) : AndroidViewModel(app) {
         )}
     }
 
-    private fun sendAction(action: String) {
-        val intent = Intent(getApplication(), GpsTrackingService::class.java).apply { this.action = action }
+    private fun sendAction(action: String, shiftId: Long = activeShift.value?.id ?: 0L) {
+        val intent = Intent(getApplication(), GpsTrackingService::class.java).apply {
+            this.action = action
+            putExtra("shiftId", shiftId)
+        }
         getApplication<Application>().startService(intent)
     }
 

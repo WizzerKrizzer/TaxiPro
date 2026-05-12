@@ -128,6 +128,7 @@ data class ZoneStat(
     val avgRevenue: Double,
     val avgTip: Double,
     val avgKm: Double,
+    val avgWaitMs: Long = 0L,
     // Individual rides for drill-down, sorted newest-first
     val pickupRides: List<Ride>  = emptyList(),
     val dropoffRides: List<Ride> = emptyList(),
@@ -146,6 +147,7 @@ fun computeZoneStats(
     rides: List<Ride>,
     zones: List<Zone>,
     outsideLabel: String,
+    waitSessions: List<ZoneWaitSession> = emptyList(),
 ): Pair<List<ZoneStat>, List<ZoneRouteStat>> {
 
     val pickups  = mutableMapOf<String, MutableList<Ride>>()
@@ -176,6 +178,7 @@ fun computeZoneStats(
             avgRevenue   = if (pr.isNotEmpty()) pr.sumOf { it.price }      / pr.size else 0.0,
             avgTip       = if (pr.isNotEmpty()) pr.sumOf { it.tip }        / pr.size else 0.0,
             avgKm        = if (pr.isNotEmpty()) pr.sumOf { it.kilometers } / pr.size else 0.0,
+            avgWaitMs    = zones.firstOrNull { it.name == name }?.let { computeAverageZoneWaitMs(waitSessions, it.id) } ?: 0L,
             pickupRides  = pr.sortedByDescending { it.startTime },
             dropoffRides = dr.sortedByDescending { it.startTime },
         )

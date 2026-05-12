@@ -302,7 +302,12 @@ private fun HistoryRideCard(
                 Column {
                     HorizontalDivider(color = tc.muted.copy(alpha = 0.15f))
                     if (routePoints.size >= 2) {
-                        RouteMapSection(routePoints, st.history.startMarker, st.history.endMarker)
+                        PremiumGate(
+                            modifier    = Modifier.fillMaxWidth(),
+                            featureHint = st.premium.gateHintMap,
+                        ) {
+                            RouteMapSection(routePoints, st.history.startMarker, st.history.endMarker)
+                        }
                     } else {
                         Box(
                             Modifier

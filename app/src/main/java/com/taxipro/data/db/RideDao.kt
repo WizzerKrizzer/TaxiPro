@@ -58,4 +58,8 @@ interface RideDao {
 
     @Query("SELECT COALESCE(SUM(waitMinutes), 0) FROM rides")
     suspend fun getTotalWaitMin(): Double
+
+    /** Sum of price + tip for all rides belonging to a shift. */
+    @Query("SELECT COALESCE(SUM(price + tip), 0.0) FROM rides WHERE shiftId = :shiftId")
+    suspend fun getTotalEarningsForShift(shiftId: Long): Double
 }

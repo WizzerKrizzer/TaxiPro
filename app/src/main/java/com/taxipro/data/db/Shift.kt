@@ -38,4 +38,8 @@ interface ShiftDao {
 
     @Query("DELETE FROM shifts")
     suspend fun deleteAll()
+
+    /** Last N completed (non-active) shifts for historical earnings analysis. */
+    @Query("SELECT * FROM shifts WHERE endTime > 0 AND isActive = 0 ORDER BY endTime DESC LIMIT :count")
+    suspend fun getLastNCompletedShifts(count: Int): List<Shift>
 }

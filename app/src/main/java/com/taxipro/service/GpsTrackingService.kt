@@ -8,7 +8,15 @@ import androidx.core.app.NotificationCompat
 import com.google.android.gms.location.*
 import com.taxipro.R
 import com.taxipro.data.db.AppSettings
+import com.taxipro.data.db.AppDatabase
+import com.taxipro.data.db.Zone
+import com.taxipro.data.db.ZoneWaitSession
+import com.taxipro.data.db.findZone
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.launch
 
 class GpsTrackingService : Service() {
 
@@ -42,6 +50,8 @@ class GpsTrackingService : Service() {
 
     private lateinit var fusedClient: FusedLocationProviderClient
     private lateinit var locationCallback: LocationCallback
+    private lateinit var db: AppDatabase
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     // Ride tracking state
     private var isTracking        = false
@@ -61,8 +71,13 @@ class GpsTrackingService : Service() {
     // Shift-level km tracking (runs independently of ride tracking)
     private var isShiftTracking   = false
     private var isShiftPaused     = false
+    private var activeShiftId     = 0L
     private var shiftTotalKm      = 0.0
     private var shiftLastGoodLoc  : Location? = null
+    private var cachedZones       : List<Zone> = emptyList()
+    private var activeZoneWaitStartMs = 0L
+    private var activeZoneWaitZoneId   = 0L
+    private var activeZoneWaitZoneName = ""
 
     private fun getTotalWaitSeconds(): Double {
         val activeMs = if (waitingStartMs > 0L) System.currentTimeMillis() - waitingStartMs else 0L
@@ -78,6 +93,7 @@ class GpsTrackingService : Service() {
     override fun onCreate() {
         super.onCreate()
         fusedClient = LocationServices.getFusedLocationProviderClient(this)
+        db = AppDatabase.getInstance(this)
         createNotificationChannel()
     }
 
@@ -87,20 +103,33 @@ class GpsTrackingService : Service() {
             ACTION_STOP        -> stopTracking()
             ACTION_PAUSE       -> pauseTracking()
             ACTION_RESUME      -> resumeTracking()
-            ACTION_SHIFT_START  -> startShiftTracking()
-            ACTION_SHIFT_STOP   -> stopShiftTracking()
-            ACTION_SHIFT_PAUSE  -> { isShiftPaused = true;  shiftLastGoodLoc = null }
-            ACTION_SHIFT_RESUME -> { isShiftPaused = false; shiftLastGoodLoc = null }
+            ACTION_SHIFT_START  -> startShiftTracking(intent.getLongExtra("shiftId", 0L))
+            ACTION_SHIFT_STOP   -> stopShiftTracking(intent.getLongExtra("shiftId", 0L))
+            ACTION_SHIFT_PAUSE  -> {
+                isShiftPaused = true
+                shiftLastGoodLoc = null
+                closeActiveZoneWait(System.currentTimeMillis())
+            }
+            ACTION_SHIFT_RESUME -> {
+                isShiftPaused = false
+                shiftLastGoodLoc = null
+                refreshZones()
+            }
         }
         return START_NOT_STICKY
     }
 
     // ── Shift-level tracking ──────────────────────────────────
 
-    private fun startShiftTracking() {
+    private fun startShiftTracking(shiftId: Long) {
         isShiftTracking  = true
+        activeShiftId    = shiftId
         shiftTotalKm     = 0.0
         shiftLastGoodLoc = null
+        activeZoneWaitStartMs = 0L
+        activeZoneWaitZoneId = 0L
+        activeZoneWaitZoneName = ""
+        refreshZones()
 
         // If no ride is active, start a lightweight location stream for shift km only
         if (!isTracking) {
@@ -109,8 +138,10 @@ class GpsTrackingService : Service() {
         }
     }
 
-    private fun stopShiftTracking() {
+    private fun stopShiftTracking(shiftId: Long) {
+        closeActiveZoneWait(System.currentTimeMillis())
         isShiftTracking = false
+        if (shiftId > 0L) activeShiftId = shiftId
         // Broadcast final shift km so ViewModel can read it before stopping
         val broadcast = Intent(BROADCAST_UPDATE).apply {
             setPackage(packageName)
@@ -124,6 +155,7 @@ class GpsTrackingService : Service() {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
+        activeShiftId = 0L
     }
 
     // ── Ride tracking ─────────────────────────────────────────
@@ -170,6 +202,7 @@ class GpsTrackingService : Service() {
     }
 
     private fun startTracking(intent: Intent) {
+        closeActiveZoneWait(System.currentTimeMillis())
         settings = AppSettings(
             startFee              = intent.getDoubleExtra("startFee", 1.50),
             pricePerKm            = intent.getDoubleExtra("pricePerKm", 1.20),
@@ -214,6 +247,7 @@ class GpsTrackingService : Service() {
                 if (distM < 300f) shiftTotalKm += distM / 1000.0
             }
             shiftLastGoodLoc = location
+            updateZoneWaitState(location)
         }
 
         // ── Ride-level tracking ────────────────────────────────
@@ -300,6 +334,7 @@ class GpsTrackingService : Service() {
     private fun stopTracking() {
         isTracking = false
         waitRunnable?.let { waitHandler.removeCallbacks(it) }
+        refreshZones()
 
         // If shift is still active keep GPS running (lighter interval), else stop
         if (isShiftTracking) {
@@ -344,6 +379,60 @@ class GpsTrackingService : Service() {
     private fun stopLocationUpdates() {
         if (::locationCallback.isInitialized) {
             fusedClient.removeLocationUpdates(locationCallback)
+        }
+    }
+
+    private fun refreshZones() {
+        serviceScope.launch {
+            cachedZones = db.zoneDao().getAllZonesOnce()
+        }
+    }
+
+    private fun updateZoneWaitState(location: Location) {
+        if (!isShiftTracking || isShiftPaused || isTracking || activeShiftId <= 0L) {
+            closeActiveZoneWait(location.time)
+            return
+        }
+        val zone = findZone(location.latitude, location.longitude, cachedZones)
+        if (zone == null) {
+            closeActiveZoneWait(location.time)
+            return
+        }
+        if (activeZoneWaitZoneId == zone.id && activeZoneWaitStartMs > 0L) return
+        closeActiveZoneWait(location.time)
+        activeZoneWaitStartMs = location.time
+        activeZoneWaitZoneId = zone.id
+        activeZoneWaitZoneName = zone.name
+    }
+
+    private fun closeActiveZoneWait(endMs: Long) {
+        val shiftId = activeShiftId
+        val startMs = activeZoneWaitStartMs
+        if (shiftId <= 0L || startMs <= 0L || activeZoneWaitZoneId <= 0L) {
+            activeZoneWaitStartMs = 0L
+            activeZoneWaitZoneId = 0L
+            activeZoneWaitZoneName = ""
+            return
+        }
+        val safeEnd = endMs.coerceAtLeast(startMs)
+        val duration = safeEnd - startMs
+        val zoneId = activeZoneWaitZoneId
+        val zoneName = activeZoneWaitZoneName
+        activeZoneWaitStartMs = 0L
+        activeZoneWaitZoneId = 0L
+        activeZoneWaitZoneName = ""
+        if (duration <= 0L) return
+        serviceScope.launch {
+            db.zoneWaitDao().insertSession(
+                ZoneWaitSession(
+                    shiftId = shiftId,
+                    zoneId = zoneId,
+                    zoneName = zoneName,
+                    startTime = startMs,
+                    endTime = safeEnd,
+                    durationMs = duration,
+                )
+            )
         }
     }
 

@@ -24,6 +24,8 @@ import com.taxipro.data.db.expType
 import com.taxipro.data.db.findZone
 import com.taxipro.data.db.freq
 import com.taxipro.data.db.formatPrice
+import com.taxipro.data.db.formatDistance
+import com.taxipro.data.db.longestZoneWait
 import com.taxipro.data.db.rideEndLatLng
 import com.taxipro.data.db.rideStartLatLng
 import androidx.compose.foundation.text.KeyboardOptions
@@ -35,6 +37,13 @@ import com.taxipro.ui.theme.LocalSettings
 import com.taxipro.ui.viewmodel.RideViewModel
 import java.util.*
 
+private fun formatStatsDuration(totalMs: Long): String {
+    val totalMinutes = (totalMs / 60_000L).coerceAtLeast(0L)
+    val hours = totalMinutes / 60
+    val minutes = totalMinutes % 60
+    return if (hours > 0) "${hours}ч ${minutes}м" else "${minutes}м"
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
@@ -43,6 +52,7 @@ fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
     val allShifts   by vm.allShifts.collectAsState(initial = emptyList())
     val allExpenses by vm.allExpenses.collectAsState(initial = emptyList())
     val allZones    by vm.allZones.collectAsState(initial = emptyList())
+    val allZoneWaitSessions by vm.allZoneWaitSessions.collectAsState(initial = emptyList())
     val st          = LocalStrings.current
     val settings    = LocalSettings.current
 
@@ -79,6 +89,11 @@ fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
         allRides.filter { it.logicalTime() in filterFromMs!!..filterToMs!! }
     else
         allRides
+    val filteredZoneWaits = if (filterFromMs != null && filterToMs != null)
+        allZoneWaitSessions.filter { it.startTime in filterFromMs!!..filterToMs!! }
+    else
+        allZoneWaitSessions
+    val longestZoneWait = remember(filteredZoneWaits) { filteredZoneWaits.longestZoneWait() }
 
     val totalTip   = filtered.sumOf { it.tip }
     val total      = filtered.sumOf { it.price } + totalTip   // gross incl. tips
@@ -180,6 +195,31 @@ fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
     }
     val uniqueShifts = filtered.map { it.shiftId }.filter { it > 0L }.toSet().size
     val avgPerShift  = if (uniqueShifts > 0) total / uniqueShifts else avgPerRide
+    val completedShiftsAllTime = remember(allShifts) {
+        allShifts.filter { it.endTime > it.startTime }
+    }
+    val ridesByShiftAllTime = remember(allRides) {
+        allRides.filter { it.shiftId > 0L && it.endTime > 0L }.groupBy { it.shiftId }
+    }
+    val avgWorkTimePerShiftAllTime = remember(completedShiftsAllTime) {
+        if (completedShiftsAllTime.isEmpty()) 0L
+        else completedShiftsAllTime.sumOf { (it.endTime - it.startTime).coerceAtLeast(0L) } / completedShiftsAllTime.size
+    }
+    val avgGrossPerShiftAllTime = remember(completedShiftsAllTime, ridesByShiftAllTime) {
+        if (completedShiftsAllTime.isEmpty()) 0.0
+        else completedShiftsAllTime.sumOf { shift ->
+            ridesByShiftAllTime[shift.id].orEmpty().sumOf { it.price + it.tip }
+        } / completedShiftsAllTime.size
+    }
+    val avgKmPerShiftAllTime = remember(completedShiftsAllTime, ridesByShiftAllTime) {
+        if (completedShiftsAllTime.isEmpty()) 0.0
+        else completedShiftsAllTime.sumOf { shift ->
+            shift.totalKm + ridesByShiftAllTime[shift.id]
+                .orEmpty()
+                .filter { it.startTime == it.endTime }
+                .sumOf { it.kilometers }
+        } / completedShiftsAllTime.size
+    }
 
     // ── Goal state ────────────────────────────────────────────
     val scope = rememberCoroutineScope()
@@ -230,6 +270,14 @@ fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
             onRangeChanged  = { f, t -> filterFromMs = f; filterToMs = t },
             onPeriodChanged = { activePeriod = it },
         )
+
+        // ── Premium gate: historical data beyond current week ──
+        run {
+            val isPremium = LocalIsPremium.current
+            if (!isPremium && activePeriod !in setOf(ActivePeriod.TODAY, ActivePeriod.WEEK)) {
+                PremiumBanner(message = st.premium.gateHintStats)
+            }
+        }
 
         // ── Goal card (WEEK or MONTH only) ───────────────────
         if (showGoalCard || (weeklyGoal == 0.0 && (activePeriod == ActivePeriod.WEEK || activePeriod == ActivePeriod.MONTH))) {
@@ -734,13 +782,23 @@ fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
             val cardCount = filtered.count { it.paymentMethod == "CARD" }
             val cashCount = filtered.size - cardCount
             val cardPct   = if (filtered.isNotEmpty()) cardCount * 100 / filtered.size else 0
-            listOf(
+            val rows = mutableListOf(
+                "${st.workTime} / ${st.avgShift.lowercase()}" to formatStatsDuration(avgWorkTimePerShiftAllTime),
+                "${st.grossRevenue} / ${st.avgShift.lowercase()}" to settings.formatPrice(avgGrossPerShiftAllTime),
+                "${st.totalKm} / ${st.avgShift.lowercase()}" to settings.formatDistance(avgKmPerShiftAllTime),
                 st.totalTips to settings.formatPrice(totalTip),
                 st.bestDay   to dayLabels[bestDow],
-                st.peakHour  to "${bestHour}:00 – ${bestHour+1}:00",
                 st.rideCount to "${filtered.size}",
                 "${st.card.replace("💳 ", "")} / ${st.cash.replace("💵 ", "")}" to "$cardCount / $cashCount  ($cardPct%)",
-            ).forEach { (k, v) ->
+                st.peakHour  to "${bestHour}:00 – ${bestHour+1}:00",
+            )
+            rows += "Най-дълго чакане в зона" to (
+                longestZoneWait?.let {
+                    "${it.zoneName}  •  ${formatStatsDuration(it.durationMs)}  •  " +
+                        "${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(it.startTime))}-${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(it.endTime))}"
+                } ?: "—"
+            )
+            rows.forEach { (k, v) ->
                 Row(
                     Modifier.fillMaxWidth().padding(vertical = 6.dp),
                     horizontalArrangement = Arrangement.SpaceBetween
@@ -780,75 +838,6 @@ fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
                     }
                     if (i < topRoutes.size - 1)
                         HorizontalDivider(color = tc.surface, thickness = 0.5.dp)
-                }
-            }
-        }
-
-        // ── Records ──────────────────────────────────────────────
-        if (allRides.isNotEmpty()) {
-            val kmRidesAll = allRides.filter { it.kilometers > 0.01 }
-            data class RecordEntry(val label: String, val value: String, val color: Color, val ride: Ride)
-            val recordEntries = buildList {
-                if (kmRidesAll.size >= 2) {
-                    kmRidesAll.maxByOrNull { it.kilometers }?.let {
-                        add(RecordEntry(st.facts.factLongestKm, "%.1f km".format(it.kilometers), Color(0xFF29B6F6), it))
-                    }
-                }
-                allRides.maxByOrNull { it.price }?.let {
-                    add(RecordEntry(st.facts.factHighestFare, settings.formatPrice(it.price), Color(0xFF4CAF50), it))
-                }
-                allRides.filter { it.tip > 0.01 }.maxByOrNull { it.tip }?.let {
-                    add(RecordEntry(st.facts.factBiggestTip, settings.formatPrice(it.tip), Color(0xFFCE93D8), it))
-                }
-                allRides.filter { it.waitMinutes > 0.5 }.maxByOrNull { it.waitMinutes }?.let {
-                    add(RecordEntry(st.facts.factLongestWait, "%.0f ${st.minAbbr}".format(it.waitMinutes), Color(0xFFFF9800), it))
-                }
-                allRides.filter { it.endTime > it.startTime }.maxByOrNull { it.endTime - it.startTime }?.let {
-                    val m = ((it.endTime - it.startTime) / 60_000L).toInt()
-                    add(RecordEntry(st.facts.factLongestDuration, "$m ${st.minAbbr}", Color(0xFFF5C842), it))
-                }
-                kmRidesAll.filter { it.price > 0.01 }.maxByOrNull { it.price / it.kilometers }?.let {
-                    val perKm = it.price / it.kilometers
-                    add(RecordEntry(st.facts.factBestPerKm, settings.formatPrice(perKm) + "/${settings.distanceUnit.shortLabel}", Color(0xFFFF9A3C), it))
-                }
-                if (kmRidesAll.size >= 2) {
-                    kmRidesAll.minByOrNull { it.kilometers }?.let {
-                        add(RecordEntry(st.facts.factShortestKm, "%.1f km".format(it.kilometers), Color(0xFF78909C), it))
-                    }
-                }
-            }
-            if (recordEntries.isNotEmpty()) {
-                val sdfRec = remember { SimpleDateFormat("dd.MM.yy", Locale.getDefault()) }
-                StatsSection(st.recordsTitle) {
-                    recordEntries.forEachIndexed { idx, entry ->
-                        val ride     = entry.ride
-                        val dateStr  = sdfRec.format(Date(ride.startTime))
-                        val routeStr = when {
-                            ride.fromAddress.isNotEmpty() && ride.toAddress.isNotEmpty() ->
-                                ride.fromAddress.substringBefore(",").take(16) + " → " +
-                                ride.toAddress.substringBefore(",").take(16)
-                            ride.fromAddress.isNotEmpty() ->
-                                ride.fromAddress.substringBefore(",").take(30)
-                            else -> "${st.ridePrefix}${ride.globalId}"
-                        }
-                        Row(
-                            Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment     = Alignment.CenterVertically,
-                        ) {
-                            Column(Modifier.weight(1f).padding(end = 8.dp)) {
-                                Text(entry.label, color = entry.color, fontSize = 11.sp,
-                                    fontWeight = FontWeight.SemiBold)
-                                Text(routeStr, color = tc.textPrimary, fontSize = 12.sp,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(dateStr, color = tc.muted, fontSize = 10.sp)
-                            }
-                            Text(entry.value, color = entry.color, fontSize = 14.sp,
-                                fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
-                        }
-                        if (idx < recordEntries.lastIndex)
-                            HorizontalDivider(color = tc.surface, thickness = 0.5.dp)
-                    }
                 }
             }
         }

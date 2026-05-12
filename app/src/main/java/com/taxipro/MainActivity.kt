@@ -27,6 +27,8 @@ import com.taxipro.ui.screens.LightColors
 import com.taxipro.ui.screens.LocalThemeColors
 import com.taxipro.ui.screens.MidnightColors
 import com.taxipro.ui.screens.SunsetColors
+import com.taxipro.ui.screens.LocalIsPremium
+import com.taxipro.ui.screens.LocalOnUpgrade
 import com.taxipro.ui.screens.*
 import com.taxipro.ui.theme.*
 import com.taxipro.ui.theme.ArStrings
@@ -112,6 +114,8 @@ fun MainApp(vm: TrackingViewModel, settingsRepo: SettingsRepository) {
     val st = LocalStrings.current
     val tc = LocalThemeColors.current
 
+    val isPremium by premiumVm.isPremium.collectAsState(initial = false)
+
     val navItems = listOf(
         NavItem(st.navRide,     Icons.Default.Navigation, "ride"),
         NavItem(st.navStats,    Icons.Default.BarChart,   "stats"),
@@ -128,13 +132,19 @@ fun MainApp(vm: TrackingViewModel, settingsRepo: SettingsRepository) {
     }
 
     val lastEndedShift by vm.lastEndedShift.collectAsState()
+
+    CompositionLocalProvider(
+        LocalIsPremium provides isPremium,
+        LocalOnUpgrade provides { selected = "premium" },
+    ) {
+
     if (lastEndedShift != null) {
         ShiftSummaryScreen(
             shift     = lastEndedShift!!,
             rideVm    = rideVm,
             onDismiss = { vm.clearLastEndedShift() }
         )
-        return
+        return@CompositionLocalProvider
     }
 
     Scaffold(
@@ -185,4 +195,6 @@ fun MainApp(vm: TrackingViewModel, settingsRepo: SettingsRepository) {
             }
         }
     }
+
+    } // end CompositionLocalProvider
 }
