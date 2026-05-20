@@ -1,22 +1,29 @@
 package com.taxipro.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -27,20 +34,29 @@ import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.LatLngBounds
 import com.google.maps.android.compose.*
 import com.taxipro.data.db.Ride
+import com.taxipro.data.db.ExpenseFrequency
+import com.taxipro.data.db.ExpenseType
+import com.taxipro.data.db.MonthlyExpenseMode
 import com.taxipro.data.db.Shift
+import com.taxipro.data.db.ShiftPauseSession
+import com.taxipro.data.db.TariffExpense
 import com.taxipro.data.db.Zone
+import com.taxipro.data.db.effectiveShiftKm
 import com.taxipro.data.db.formatPrice
 import com.taxipro.data.db.longestZoneWait
 import com.taxipro.data.db.rideRouteLabels
+import com.taxipro.data.db.expType
+import com.taxipro.data.db.freq
+import com.taxipro.data.db.monthMode
 import com.taxipro.ui.theme.LocalSettings
 import com.taxipro.ui.theme.LocalStrings
 import com.taxipro.ui.viewmodel.RideViewModel
 import java.text.SimpleDateFormat
 import java.util.*
 
-// ── 50 distinct high-contrast polyline colors ────────────────────
+// -- 50 distinct high-contrast polyline colors --------------------
 // Colors ordered with step-11 interleave so consecutive cards always differ in hue
-// (original list had 5-hue-family rows → every 5th card looked similar)
+// (original list had 5-hue-family rows > every 5th card looked similar)
 private val RIDE_COLORS = listOf(
     Color(0xFFE53935), Color(0xFF039BE5), Color(0xFF00897B), Color(0xFFE65100), Color(0xFF4A148C),
     Color(0xFFE91E63), Color(0xFF0097A7), Color(0xFF2E7D32), Color(0xFF37474F), Color(0xFF311B92),
@@ -54,7 +70,7 @@ private val RIDE_COLORS = listOf(
     Color(0xFFBF360C), Color(0xFF00BCD4), Color(0xFF558B2F), Color(0xFFFF6F00), Color(0xFF880E4F),
 )
 
-// ── Route JSON parser ─────────────────────────────────────────────
+// -- Route JSON parser ---------------------------------------------
 private fun parseRideRouteJson(json: String): List<LatLng> {
     if (json == "[]" || json.isBlank()) return emptyList()
     return Regex("""\[([+-]?\d+\.?\d*),([+-]?\d+\.?\d*)\]""")
@@ -70,30 +86,167 @@ private fun formatDurationForShiftHistory(totalMs: Long): String {
     return if (hours > 0) "${hours}ч ${minutes}м" else "${minutes}м"
 }
 
+private fun startOfDay(ms: Long): Long {
+    val c = Calendar.getInstance().apply { timeInMillis = ms }
+    c.set(Calendar.HOUR_OF_DAY, 0)
+    c.set(Calendar.MINUTE, 0)
+    c.set(Calendar.SECOND, 0)
+    c.set(Calendar.MILLISECOND, 0)
+    return c.timeInMillis
+}
+
+private fun startOfWeek(ms: Long): Long {
+    val c = Calendar.getInstance().apply { timeInMillis = ms }
+    c.set(Calendar.DAY_OF_WEEK, c.firstDayOfWeek)
+    return startOfDay(c.timeInMillis)
+}
+
+private fun startOfMonth(ms: Long): Long {
+    val c = Calendar.getInstance().apply { timeInMillis = ms }
+    c.set(Calendar.DAY_OF_MONTH, 1)
+    return startOfDay(c.timeInMillis)
+}
+
+private fun daysInMonth(ms: Long): Int {
+    val c = Calendar.getInstance().apply { timeInMillis = ms }
+    return c.getActualMaximum(Calendar.DAY_OF_MONTH).coerceAtLeast(1)
+}
+
+private fun estimateShiftCustomExpenses(
+    expenses: List<TariffExpense>,
+    rideCount: Int,
+    grossTotal: Double,
+    shiftsSameDay: Int,
+    shiftsSameWeek: Int,
+    shiftMonthDays: Int,
+): Double = expenses.sumOf { exp ->
+    when (exp.freq) {
+        ExpenseFrequency.PER_DAY -> if (exp.expType == ExpenseType.FIXED) {
+            exp.amount / shiftsSameDay.coerceAtLeast(1)
+        } else {
+            grossTotal * exp.amount / 100.0
+        }
+        ExpenseFrequency.PER_WEEK -> if (exp.expType == ExpenseType.FIXED) {
+            exp.amount / shiftsSameWeek.coerceAtLeast(1)
+        } else {
+            grossTotal * exp.amount / 100.0
+        }
+        ExpenseFrequency.PER_RIDE -> if (exp.expType == ExpenseType.FIXED) {
+            exp.amount * rideCount
+        } else {
+            grossTotal * exp.amount / 100.0
+        }
+        ExpenseFrequency.PER_SHIFT -> if (exp.expType == ExpenseType.FIXED) {
+            exp.amount
+        } else {
+            grossTotal * exp.amount / 100.0
+        }
+        ExpenseFrequency.PER_MONTH -> if (exp.expType == ExpenseType.FIXED) {
+            val divisor = when (exp.monthMode) {
+                MonthlyExpenseMode.MANUAL -> exp.manualWorkDays.coerceAtLeast(1)
+                MonthlyExpenseMode.AUTO -> shiftMonthDays.coerceAtLeast(1)
+            }
+            (exp.amount / divisor) / shiftsSameDay.coerceAtLeast(1)
+        } else {
+            grossTotal * exp.amount / 100.0
+        }
+    }
+        .toDouble()
+}
+
+private fun normalizedShiftExpenses(allExpenses: List<TariffExpense>): List<TariffExpense> =
+    allExpenses
+        .groupBy { listOf(it.name, it.frequency, it.type, it.amount).joinToString("|") }
+        .map { it.value.first() }
+
+private enum class ShiftHistorySort {
+    NEWEST, REVENUE, DURATION, RIDES, TOTAL_KM, CLIENT_KM
+}
+
 
 @Composable
 fun ShiftHistoryScreen(rideVm: RideViewModel) {
     val tc        = LocalThemeColors.current
     val st        = LocalStrings.current
     val allShifts by rideVm.allShifts.collectAsState(initial = emptyList())
+    val allRides  by rideVm.allRides.collectAsState(initial = emptyList())
     var expandedId by remember { mutableStateOf<Long?>(null) }
+    var detailShiftId by remember { mutableStateOf<Long?>(null) }
+    var sortBy by remember { mutableStateOf(ShiftHistorySort.NEWEST) }
+    var sortAsc by remember { mutableStateOf(false) }
 
     val nowMs        = remember { System.currentTimeMillis() }
     val initWeek     = remember { pfCurrentWeekRange() }
     var filterFromMs by remember { mutableStateOf<Long?>(initWeek.first) }
     var filterToMs   by remember { mutableStateOf<Long?>(initWeek.second) }
+    var revenueFilterText by remember { mutableStateOf("") }
+    var hoursFilterText   by remember { mutableStateOf("") }
+    var revenueFilterIsMin by remember { mutableStateOf(true) }
+    var hoursFilterIsMin   by remember { mutableStateOf(true) }
+    var appliedRevenueFilterText by remember { mutableStateOf("") }
+    var appliedHoursFilterText   by remember { mutableStateOf("") }
+    var appliedRevenueFilterIsMin by remember { mutableStateOf(true) }
+    var appliedHoursFilterIsMin   by remember { mutableStateOf(true) }
 
-    val displayed = remember(allShifts, filterFromMs, filterToMs) {
-        if (filterFromMs != null && filterToMs != null)
-            allShifts.filter { it.startTime in filterFromMs!!..filterToMs!! }
-        else
-            allShifts
+    val revenueFilter = appliedRevenueFilterText.replace(",", ".").toDoubleOrNull()
+    val hoursFilter   = appliedHoursFilterText.replace(",", ".").toDoubleOrNull()
+    val minRevenue = revenueFilter.takeIf { appliedRevenueFilterIsMin }
+    val maxRevenue = revenueFilter.takeIf { !appliedRevenueFilterIsMin }
+    val minHours   = hoursFilter.takeIf { appliedHoursFilterIsMin }
+    val maxHours   = hoursFilter.takeIf { !appliedHoursFilterIsMin }
+
+    val ridesByShift = remember(allRides) { allRides.filter { it.shiftId > 0L }.groupBy { it.shiftId } }
+    val filteredShifts = remember(allShifts, ridesByShift, filterFromMs, filterToMs, minRevenue, maxRevenue, minHours, maxHours) {
+        allShifts.filter { shift ->
+            val inPeriod = filterFromMs == null || filterToMs == null ||
+                shift.startTime in filterFromMs!!..filterToMs!!
+            val rides = ridesByShift[shift.id].orEmpty().ifEmpty {
+                ridesByShift[shift.shiftNumber].orEmpty().filter { ride ->
+                    ride.startTime >= shift.startTime &&
+                        (shift.endTime <= 0L || ride.startTime <= shift.endTime)
+                }
+            }
+            val revenue = rides.sumOf { it.price + it.tip }
+            val endMs = if (shift.endTime > 0) shift.endTime else System.currentTimeMillis()
+            val hours = ((endMs - shift.startTime).coerceAtLeast(0L)) / 3_600_000.0
+            inPeriod &&
+                (minRevenue == null || revenue >= minRevenue) &&
+                (maxRevenue == null || revenue <= maxRevenue) &&
+                (minHours == null || hours >= minHours) &&
+                (maxHours == null || hours <= maxHours)
+        }
+    }
+    val displayed = remember(filteredShifts, ridesByShift, sortBy, sortAsc) {
+        fun ridesFor(shift: Shift): List<Ride> =
+            ridesByShift[shift.id].orEmpty().ifEmpty {
+                ridesByShift[shift.shiftNumber].orEmpty().filter { ride ->
+                    ride.startTime >= shift.startTime &&
+                        (shift.endTime <= 0L || ride.startTime <= shift.endTime)
+                }
+            }
+        val comparator = when (sortBy) {
+            ShiftHistorySort.NEWEST -> compareBy<Shift> { it.startTime }
+            ShiftHistorySort.REVENUE -> compareBy { shift -> ridesFor(shift).sumOf { it.price + it.tip } }
+            ShiftHistorySort.DURATION -> compareBy { shift ->
+                val endMs = if (shift.endTime > 0) shift.endTime else System.currentTimeMillis()
+                (endMs - shift.startTime).coerceAtLeast(0L)
+            }
+            ShiftHistorySort.RIDES -> compareBy { shift -> ridesFor(shift).size }
+            ShiftHistorySort.TOTAL_KM -> compareBy { shift ->
+                val rides = ridesFor(shift)
+                effectiveShiftKm(shift.totalKm, rides.sumOf { it.kilometers })
+            }
+            ShiftHistorySort.CLIENT_KM -> compareBy { shift -> ridesFor(shift).sumOf { it.kilometers } }
+        }
+        if (sortAsc) filteredShifts.sortedWith(comparator)
+        else filteredShifts.sortedWith(comparator.reversed())
     }
 
     Column(
         Modifier
             .fillMaxSize()
             .background(tc.background)
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp)
     ) {
         Spacer(Modifier.height(16.dp))
@@ -104,6 +257,48 @@ fun ShiftHistoryScreen(rideVm: RideViewModel) {
         Spacer(Modifier.height(8.dp))
 
         PeriodFilterRow(onRangeChanged = { f, t -> filterFromMs = f; filterToMs = t })
+        ShiftHistoryFilters(
+            revenueText = revenueFilterText,
+            hoursText = hoursFilterText,
+            revenueIsMin = revenueFilterIsMin,
+            hoursIsMin = hoursFilterIsMin,
+            onRevenueChange = { revenueFilterText = it },
+            onHoursChange = { hoursFilterText = it },
+            onToggleRevenueMode = {
+                revenueFilterIsMin = !revenueFilterIsMin
+                appliedRevenueFilterIsMin = revenueFilterIsMin
+                if (revenueFilterText.isNotBlank()) appliedRevenueFilterText = revenueFilterText
+            },
+            onToggleHoursMode = {
+                hoursFilterIsMin = !hoursFilterIsMin
+                appliedHoursFilterIsMin = hoursFilterIsMin
+                if (hoursFilterText.isNotBlank()) appliedHoursFilterText = hoursFilterText
+            },
+            onApplyRevenue = {
+                appliedRevenueFilterText = revenueFilterText
+                appliedRevenueFilterIsMin = revenueFilterIsMin
+            },
+            onApplyHours = {
+                appliedHoursFilterText = hoursFilterText
+                appliedHoursFilterIsMin = hoursFilterIsMin
+            },
+            onClear = {
+                revenueFilterText = ""
+                hoursFilterText = ""
+                revenueFilterIsMin = true
+                hoursFilterIsMin = true
+                appliedRevenueFilterText = ""
+                appliedHoursFilterText = ""
+                appliedRevenueFilterIsMin = true
+                appliedHoursFilterIsMin = true
+            },
+        )
+        ShiftHistorySortRow(
+            selected = sortBy,
+            ascending = sortAsc,
+            onSelected = { sortBy = it },
+            onToggleDirection = { sortAsc = !sortAsc },
+        )
         Spacer(Modifier.height(6.dp))
 
         var pendingDelete by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -114,18 +309,21 @@ fun ShiftHistoryScreen(rideVm: RideViewModel) {
             }
         } else {
             Column(
-                Modifier.verticalScroll(rememberScrollState()),
+                Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 displayed.forEach { shift ->
-                    SwipeToDeleteBox(onDeleteRequest = { pendingDelete = { rideVm.deleteShift(shift) } }) {
-                        ShiftCard(
-                            shift      = shift,
-                            rideVm     = rideVm,
-                            isExpanded = expandedId == shift.id,
-                            onToggle   = { expandedId = if (expandedId == shift.id) null else shift.id },
-                            onDelete   = { pendingDelete = { rideVm.deleteShift(shift) } },
-                        )
+                    key(shift.id) {
+                        SwipeToDeleteBox(onDeleteRequest = { pendingDelete = { rideVm.deleteShift(shift) } }) {
+                            ShiftCard(
+                                shift      = shift,
+                                rideVm     = rideVm,
+                                isExpanded = expandedId == shift.id,
+                                onToggle   = { expandedId = if (expandedId == shift.id) null else shift.id },
+                                onDelete   = { pendingDelete = { rideVm.deleteShift(shift) } },
+                                onOpenDetail = { detailShiftId = shift.id },
+                            )
+                        }
                     }
                 }
                 Spacer(Modifier.height(80.dp))
@@ -139,7 +337,177 @@ fun ShiftHistoryScreen(rideVm: RideViewModel) {
                 onDismiss = { pendingDelete = null },
             )
         }
+
+        detailShiftId?.let { selectedId ->
+            val currentIndex = displayed.indexOfFirst { it.id == selectedId }
+            val currentShift = displayed.getOrNull(currentIndex)
+            if (currentShift != null) {
+                val prevShift = displayed.getOrNull(currentIndex - 1)
+                val nextShift = displayed.getOrNull(currentIndex + 1)
+                val shiftRides = rideVm.getRidesForShift(currentShift).collectAsState(initial = emptyList()).value
+                val zones = rideVm.allZones.collectAsState(initial = emptyList()).value
+                ShiftDetailDialog(
+                    shift = currentShift,
+                    rides = shiftRides,
+                    zones = zones,
+                    rideVm = rideVm,
+                    onDismiss = { detailShiftId = null },
+                    onPrevShift = prevShift?.let { { detailShiftId = it.id } },
+                    onNextShift = nextShift?.let { { detailShiftId = it.id } },
+                )
+            }
+        }
     }
+}
+
+@Composable
+private fun ShiftHistorySortRow(
+    selected: ShiftHistorySort,
+    ascending: Boolean,
+    onSelected: (ShiftHistorySort) -> Unit,
+    onToggleDirection: () -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    var expanded by remember { mutableStateOf(false) }
+    val labels = mapOf(
+        ShiftHistorySort.NEWEST to "Дата",
+        ShiftHistorySort.REVENUE to "Оборот",
+        ShiftHistorySort.DURATION to "Време",
+        ShiftHistorySort.RIDES to "Курсове",
+        ShiftHistorySort.TOTAL_KM to "Общи км",
+        ShiftHistorySort.CLIENT_KM to "Км с клиент",
+    )
+    Row(
+        Modifier.fillMaxWidth().padding(top = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.weight(1f)) {
+            OutlinedButton(
+                onClick = { expanded = true },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = tc.accent),
+            ) {
+                Icon(Icons.Default.Sort, null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Сортирай: ${labels[selected]}", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, modifier = Modifier.background(tc.card)) {
+                labels.forEach { (sort, label) ->
+                    DropdownMenuItem(
+                        text = { Text(label, color = if (sort == selected) tc.accent else tc.textPrimary) },
+                        onClick = { onSelected(sort); expanded = false },
+                    )
+                }
+            }
+        }
+        OutlinedButton(
+            onClick = onToggleDirection,
+            shape = RoundedCornerShape(10.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = tc.accent),
+        ) {
+            Text(if (ascending) "↑" else "↓", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@Composable
+private fun ShiftHistoryFilters(
+    revenueText: String,
+    hoursText: String,
+    revenueIsMin: Boolean,
+    hoursIsMin: Boolean,
+    onRevenueChange: (String) -> Unit,
+    onHoursChange: (String) -> Unit,
+    onToggleRevenueMode: () -> Unit,
+    onToggleHoursMode: () -> Unit,
+    onApplyRevenue: () -> Unit,
+    onApplyHours: () -> Unit,
+    onClear: () -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    val settings = LocalSettings.current
+    val hasFilters = revenueText.isNotBlank() || hoursText.isNotBlank()
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = tc.card),
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Филтър на смени", color = tc.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                if (hasFilters) {
+                    TextButton(onClick = onClear, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                        Icon(Icons.Default.Clear, null, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Изчисти", fontSize = 11.sp)
+                    }
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ShiftNumberFilter("Сума", revenueText, settings.currency.symbol, revenueIsMin, Modifier.weight(1f), onToggleRevenueMode, onRevenueChange, onApplyRevenue)
+                ShiftNumberFilter("Часове", hoursText, "ч", hoursIsMin, Modifier.weight(1f), onToggleHoursMode, onHoursChange, onApplyHours)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ShiftNumberFilter(
+    label: String,
+    value: String,
+    suffix: String,
+    isMin: Boolean,
+    modifier: Modifier = Modifier,
+    onToggleMode: () -> Unit,
+    onValueChange: (String) -> Unit,
+    onApply: () -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    OutlinedTextField(
+        value = value,
+        onValueChange = { raw -> onValueChange(raw.filter { it.isDigit() || it == '.' || it == ',' }) },
+        modifier = modifier,
+        label = {
+            Text(
+                label,
+                color = tc.muted,
+                fontSize = 10.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
+        leadingIcon = {
+            TextButton(
+                onClick = onToggleMode,
+                contentPadding = PaddingValues(horizontal = 4.dp),
+                modifier = Modifier.width(44.dp),
+            ) {
+                Text(if (isMin) "Мин" else "Макс", color = tc.accent, fontSize = 10.sp)
+            }
+        },
+        suffix = { Text(suffix, color = tc.muted, fontSize = 10.sp) },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(
+            keyboardType = KeyboardType.Decimal,
+            imeAction = ImeAction.Done,
+        ),
+        keyboardActions = KeyboardActions(onDone = { onApply() }),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = tc.accent,
+            unfocusedBorderColor = tc.surface,
+            focusedTextColor = tc.textPrimary,
+            unfocusedTextColor = tc.textPrimary,
+            cursorColor = tc.accent,
+            focusedLabelColor = tc.accent,
+        ),
+    )
 }
 
 @Composable
@@ -149,11 +517,12 @@ private fun ShiftCard(
     isExpanded: Boolean,
     onToggle: () -> Unit,
     onDelete: () -> Unit,
+    onOpenDetail: () -> Unit,
 ) {
     val tc       = LocalThemeColors.current
     val st       = LocalStrings.current
     val settings = LocalSettings.current
-    val rides    by rideVm.getRidesByShift(shift.id).collectAsState(initial = emptyList())
+    val rides    by rideVm.getRidesForShift(shift).collectAsState(initial = emptyList())
 
     val sdfDate = SimpleDateFormat("dd.MM.yyyy", Locale.getDefault())
     val sdfTime = SimpleDateFormat("HH:mm", Locale.getDefault())
@@ -171,7 +540,7 @@ private fun ShiftCard(
     val tips     = rides.sumOf { it.tip }
     val km       = rides.sumOf { it.kilometers }
     // Use total shift km (includes dead miles); fall back to client km for legacy shifts
-    val shiftKm  = if (shift.totalKm > 0.0) shift.totalKm else km
+    val shiftKm  = effectiveShiftKm(shift.totalKm, km)
     var showMenu by remember { mutableStateOf(false) }
 
     Card(
@@ -180,7 +549,7 @@ private fun ShiftCard(
         shape    = RoundedCornerShape(12.dp)
     ) {
         Column {
-            // ── Header row ───────────────────────────────────
+            // -- Header row -----------------------------------
             Box {
             Row(
                 Modifier
@@ -241,10 +610,9 @@ private fun ShiftCard(
                         else "...",
                         color = tc.muted, fontSize = 11.sp
                     )
-                    val kmText = if (shiftKm > km + 0.05)
-                        "${rides.size} ${st.ridesLabel}  •  $durStr  •  %.1f km (%.1f ${st.withClients})".format(shiftKm, km)
-                    else
-                        "${rides.size} ${st.ridesLabel}  •  $durStr  •  %.1f km".format(km)
+                    val kmText =
+                        "${rides.size} ${st.ridesLabel}  •  $durStr  •  %.1f km (%.1f ${st.withClients})"
+                            .format(shiftKm, km)
                     Text(kmText, color = tc.muted, fontSize = 11.sp)
                 }
                 Spacer(Modifier.width(8.dp))
@@ -294,7 +662,7 @@ private fun ShiftCard(
             }
             } // close Box
 
-            // ── Expandable detail ────────────────────────────
+            // -- Expandable detail ----------------------------
             AnimatedVisibility(
                 visible = isExpanded,
                 enter   = expandVertically(),
@@ -302,7 +670,7 @@ private fun ShiftCard(
             ) {
                 Column {
                     HorizontalDivider(color = tc.muted.copy(alpha = 0.15f))
-                    ShiftDetailPanel(shift = shift, rides = rides, rideVm = rideVm)
+                    ShiftDetailPanel(shift = shift, rides = rides, rideVm = rideVm, onOpenDetail = onOpenDetail)
                 }
             }
         }
@@ -310,10 +678,11 @@ private fun ShiftCard(
 }
 
 @Composable
-private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewModel) {
+private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewModel, onOpenDetail: () -> Unit) {
     val tc       = LocalThemeColors.current
     val st       = LocalStrings.current
     val settings = LocalSettings.current
+    val sdfTime  = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
     var pendingDelete by remember { mutableStateOf<(() -> Unit)?>(null) }
     var showMap       by remember { mutableStateOf(false) }
     var showDetail    by remember { mutableStateOf(false) }
@@ -321,6 +690,9 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewMo
     var selectedRide  by remember { mutableStateOf<Ride?>(null) }
     val zones         by rideVm.allZones.collectAsState(initial = emptyList())
     val zoneWaits     by rideVm.getZoneWaitsByShift(shift.id).collectAsState(initial = emptyList())
+    val pauseSessions by rideVm.getShiftPausesByShift(shift.id).collectAsState(initial = emptyList())
+    val allExpenses   by rideVm.allExpenses.collectAsState(initial = emptyList())
+    val allShifts     by rideVm.allShifts.collectAsState(initial = emptyList())
     val chartScale    by rideVm.chartScale.collectAsState()
     val isPremium      = LocalIsPremium.current
     val onUpgrade      = LocalOnUpgrade.current
@@ -330,13 +702,30 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewMo
     val totalKm      = rides.sumOf { it.kilometers }
     val totalWait    = rides.sumOf { it.waitMinutes }
     val avgPerRide   = if (rides.isNotEmpty()) totalRevenue / rides.size else 0.0
-    val shiftKm      = if (shift.totalKm > 0.0) shift.totalKm else totalKm
+    val shiftKm      = effectiveShiftKm(shift.totalKm, totalKm)
     val avgFuelCostPerKm = if (rides.isNotEmpty())
         rides.sumOf { it.fuelCostPerKm } / rides.size else 0.0
     val fuelCost     = shiftKm * avgFuelCostPerKm
     val taxCost      = rides.sumOf { it.price * it.taxPercent / 100.0 }
-    val netProfit    = totalRevenue - fuelCost - taxCost
-    val longestZoneWait = remember(zoneWaits) { zoneWaits.longestZoneWait() }
+    val shiftDayStart = remember(shift.startTime) { startOfDay(shift.startTime) }
+    val shiftWeekStart = remember(shift.startTime) { startOfWeek(shift.startTime) }
+    val shiftsSameDay = remember(allShifts, shiftDayStart) {
+        allShifts.count { startOfDay(it.startTime) == shiftDayStart }.coerceAtLeast(1)
+    }
+    val shiftsSameWeek = remember(allShifts, shiftWeekStart) {
+        allShifts.count { startOfWeek(it.startTime) == shiftWeekStart }.coerceAtLeast(1)
+    }
+    val shiftMonthDays = remember(shift.startTime) { daysInMonth(shift.startTime) }
+    val shiftExpenses = remember(allExpenses) { normalizedShiftExpenses(allExpenses) }
+    val customExpenseCost = estimateShiftCustomExpenses(
+        shiftExpenses,
+        rides.size,
+        totalRevenue + totalTips,
+        shiftsSameDay,
+        shiftsSameWeek,
+        shiftMonthDays,
+    )
+    val netProfit    = totalRevenue + totalTips - fuelCost - taxCost - customExpenseCost
 
     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(
@@ -360,7 +749,7 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewMo
 
         HorizontalDivider(color = tc.muted.copy(alpha = 0.15f))
 
-        // ── Earnings timeline chart ──────────────────────────
+        // -- Earnings timeline chart --------------------------
         if (rides.isNotEmpty()) {
             val actualDurationHours = if (shift.endTime > 0)
                 (shift.endTime - shift.startTime) / 3_600_000.0
@@ -368,6 +757,7 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewMo
             ShiftEarningsChart(
                 rides                 = rides,
                 waitSessions          = zoneWaits,
+                pauseSessions         = pauseSessions,
                 shiftStartMs          = shift.startTime,
                 shiftEndMs            = if (shift.endTime > 0) shift.endTime
                                         else System.currentTimeMillis(),
@@ -378,41 +768,12 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewMo
             )
         }
 
-        longestZoneWait?.let { wait ->
-            Card(
-                colors = CardDefaults.cardColors(containerColor = tc.cardAlt.copy(alpha = 0.55f)),
-                shape = RoundedCornerShape(10.dp),
-            ) {
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Най-дълго чакане в зона", color = tc.textPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            "${wait.zoneName}  •  ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(wait.startTime))} - ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(wait.endTime))}",
-                            color = tc.muted,
-                            fontSize = 10.sp,
-                        )
-                    }
-                    Text(
-                        formatDurationForShiftHistory(wait.durationMs),
-                        color = tc.accent,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
-                    )
-                }
-            }
-        }
-
         if (rides.isEmpty()) {
             Text(st.noRidesInShift, color = tc.muted, fontSize = 12.sp)
         } else {
             val sortedRides = rides.sortedByDescending { it.startTime }
 
-            // ── Compute "best fact" badges per ride ──────────
+            // -- Compute "best fact" badges per ride ----------
             val rideBadges: Map<Long, List<Pair<String, Color>>> = remember(rides) {
                 if (rides.size < 2) return@remember emptyMap()
                 val result = mutableMapOf<Long, MutableList<Pair<String, Color>>>()
@@ -498,6 +859,17 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewMo
                             val mainLabel = addrLabel.ifEmpty { "${st.ridePrefix}${ride.globalId}" }
                             Text(mainLabel, color = tc.textPrimary, fontSize = 12.sp,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            val timeRange = if (ride.endTime > ride.startTime)
+                                "${sdfTime.format(Date(ride.startTime))} – ${sdfTime.format(Date(ride.endTime))}"
+                            else
+                                sdfTime.format(Date(ride.startTime))
+                            Text(
+                                timeRange,
+                                color = tc.muted,
+                                fontSize = 10.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                             if (badges.isNotEmpty()) {
                                 Spacer(Modifier.height(3.dp))
                                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -550,13 +922,13 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewMo
         }
     }
 
-    // ── More info button ─────────────────────────────────────────
+    // -- More info button -----------------------------------------
     if (rides.isNotEmpty()) {
         Spacer(Modifier.height(4.dp))
         HorizontalDivider(color = tc.muted.copy(alpha = 0.15f))
         Spacer(Modifier.height(4.dp))
         Button(
-            onClick  = { if (isPremium) showDetail = true else showGate = true },
+            onClick  = { if (isPremium) onOpenDetail() else showGate = true },
             modifier = Modifier.fillMaxWidth(),
             colors   = ButtonDefaults.buttonColors(
                 containerColor = tc.accent.copy(alpha = 0.15f),
@@ -573,9 +945,6 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewMo
 
     if (showMap) {
         ShiftMapDialog(shift = shift, rides = rides, onDismiss = { showMap = false })
-    }
-    if (showDetail) {
-        ShiftDetailDialog(shift = shift, rides = rides, zones = zones, rideVm = rideVm, onDismiss = { showDetail = false })
     }
     selectedRide?.let { ride ->
         ZoneRideDetailDialog(
@@ -602,7 +971,7 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewMo
     }
 }
 
-// ── Shift Map Dialog ─────────────────────────────────────────────
+// -- Shift Map Dialog ---------------------------------------------
 
 @Composable
 private fun ShiftMapDialog(shift: Shift, rides: List<Ride>, onDismiss: () -> Unit) {
@@ -611,7 +980,7 @@ private fun ShiftMapDialog(shift: Shift, rides: List<Ride>, onDismiss: () -> Uni
     val settings = LocalSettings.current
     val sdfTime  = SimpleDateFormat("HH:mm", Locale.getDefault())
 
-    // Parse all routes upfront; keep only rides with ≥2 points
+    // Parse all routes upfront; keep only rides with ?2 points
     val rideRoutes: List<Pair<Ride, List<LatLng>>> = remember(rides) {
         rides.sortedBy { it.startTime }.mapIndexedNotNull { _, ride ->
             val pts = parseRideRouteJson(ride.routePointsJson)
@@ -645,7 +1014,7 @@ private fun ShiftMapDialog(shift: Shift, rides: List<Ride>, onDismiss: () -> Uni
                 .fillMaxSize()
                 .background(tc.background)
         ) {
-            // ── Map ──────────────────────────────────────────────
+            // -- Map ----------------------------------------------
             GoogleMap(
                 modifier            = Modifier.fillMaxSize(),
                 cameraPositionState = cameraState,
@@ -681,7 +1050,7 @@ private fun ShiftMapDialog(shift: Shift, rides: List<Ride>, onDismiss: () -> Uni
                 }
             }
 
-            // ── Top bar ───────────────────────────────────────────
+            // -- Top bar -------------------------------------------
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -714,7 +1083,7 @@ private fun ShiftMapDialog(shift: Shift, rides: List<Ride>, onDismiss: () -> Uni
                 }
             }
 
-            // ── Empty state ───────────────────────────────────────
+            // -- Empty state ---------------------------------------
             if (rideRoutes.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Card(
@@ -734,7 +1103,7 @@ private fun ShiftMapDialog(shift: Shift, rides: List<Ride>, onDismiss: () -> Uni
                 }
             }
 
-            // ── Ride info popup (bottom) ──────────────────────────
+            // -- Ride info popup (bottom) --------------------------
             selectedRide?.let { ride ->
                 val rideIdx = rideRoutes.indexOfFirst { it.first.id == ride.id }
                 val color   = if (rideIdx >= 0) RIDE_COLORS[rideIdx % RIDE_COLORS.size] else tc.accent
@@ -778,7 +1147,7 @@ private fun ShiftMapDialog(shift: Shift, rides: List<Ride>, onDismiss: () -> Uni
                         // Address
                         val addr = when {
                             ride.fromAddress.isNotEmpty() && ride.toAddress.isNotEmpty() ->
-                                "${ride.fromAddress.substringBefore(",").take(22)} → " +
+                                "${ride.fromAddress.substringBefore(",").take(22)} > " +
                                 ride.toAddress.substringBefore(",").take(22)
                             ride.fromAddress.isNotEmpty() -> ride.fromAddress.take(40)
                             else -> ""
@@ -828,35 +1197,63 @@ private fun MiniStat(label: String, value: String, color: Color) {
     }
 }
 
-// ── Shift Detail Dialog ──────────────────────────────────────────
+// -- Shift Detail Dialog ------------------------------------------
 
 @Composable
-private fun ShiftDetailDialog(shift: Shift, rides: List<Ride>, zones: List<Zone>, rideVm: RideViewModel, onDismiss: () -> Unit) {
+private fun ShiftDetailDialog(
+    shift: Shift,
+    rides: List<Ride>,
+    zones: List<Zone>,
+    rideVm: RideViewModel,
+    onDismiss: () -> Unit,
+    onPrevShift: (() -> Unit)? = null,
+    onNextShift: (() -> Unit)? = null,
+) {
     val tc       = LocalThemeColors.current
     val st       = LocalStrings.current
     val settings = LocalSettings.current
     val sdfDate  = SimpleDateFormat("dd.MM.yyyy", Locale.getDefault())
     val sdfTime  = SimpleDateFormat("HH:mm",       Locale.getDefault())
     var selectedRide by remember { mutableStateOf<Ride?>(null) }
+    val zoneWaits by rideVm.getZoneWaitsByShift(shift.id).collectAsState(initial = emptyList())
+    val pauseSessions by rideVm.getShiftPausesByShift(shift.id).collectAsState(initial = emptyList())
+    val allExpenses by rideVm.allExpenses.collectAsState(initial = emptyList())
+    val allShifts by rideVm.allShifts.collectAsState(initial = emptyList())
 
-    // ── Computed values ──────────────────────────────────────
+    // -- Computed values --------------------------------------
     val sortedRides   = remember(rides) { rides.sortedBy { it.startTime } }
     val totalRevenue  = rides.sumOf { it.price }
     val totalTips     = rides.sumOf { it.tip }
     val totalClientKm = rides.sumOf { it.kilometers }
-    val shiftKm       = if (shift.totalKm > 0.0) shift.totalKm else totalClientKm
+    val shiftKm       = effectiveShiftKm(shift.totalKm, totalClientKm)
     val avgFuelPerKm  = if (rides.isNotEmpty()) rides.sumOf { it.fuelCostPerKm } / rides.size else 0.0
     val fuelCost      = shiftKm * avgFuelPerKm
     val taxCost       = rides.sumOf { it.price * it.taxPercent / 100.0 }
-    val netProfit     = totalRevenue + totalTips - fuelCost - taxCost
+    val shiftDayStart = remember(shift.startTime) { startOfDay(shift.startTime) }
+    val shiftWeekStart = remember(shift.startTime) { startOfWeek(shift.startTime) }
+    val shiftsSameDay = remember(allShifts, shiftDayStart) {
+        allShifts.count { startOfDay(it.startTime) == shiftDayStart }.coerceAtLeast(1)
+    }
+    val shiftsSameWeek = remember(allShifts, shiftWeekStart) {
+        allShifts.count { startOfWeek(it.startTime) == shiftWeekStart }.coerceAtLeast(1)
+    }
+    val shiftMonthDays = remember(shift.startTime) { daysInMonth(shift.startTime) }
+    val shiftExpenses = remember(allExpenses) { normalizedShiftExpenses(allExpenses) }
+    val customExpenseCost = estimateShiftCustomExpenses(
+        shiftExpenses,
+        rides.size,
+        totalRevenue + totalTips,
+        shiftsSameDay,
+        shiftsSameWeek,
+        shiftMonthDays,
+    )
+    val netProfit     = totalRevenue + totalTips - fuelCost - taxCost - customExpenseCost
 
     val avgFare       = if (rides.isNotEmpty()) totalRevenue / rides.size else 0.0
     val avgKmPerRide  = if (rides.isNotEmpty()) totalClientKm / rides.size else 0.0
     val clientRatio   = if (shiftKm > 0) totalClientKm / shiftKm * 100 else 0.0
 
     val maxSpeed      = rides.maxOfOrNull { it.maxSpeed } ?: 0.0
-    val avgSpeedRides = rides.filter { it.avgSpeed > 0 }
-    val avgSpeed      = if (avgSpeedRides.isNotEmpty()) avgSpeedRides.sumOf { it.avgSpeed } / avgSpeedRides.size else 0.0
 
     val endMs         = if (shift.endTime > 0) shift.endTime else System.currentTimeMillis()
     val shiftDurMs    = endMs - shift.startTime
@@ -867,6 +1264,7 @@ private fun ShiftDetailDialog(shift: Shift, rides: List<Ride>, zones: List<Zone>
     val activeMin     = (activeDurMs % 3_600_000L) / 60_000L
     val totalWaitMin  = rides.sumOf { it.waitMinutes }
     val efficiency    = if (shiftDurMs > 0) activeDurMs.toDouble() / shiftDurMs * 100 else 0.0
+    val longestZoneWait = remember(zoneWaits) { zoneWaits.longestZoneWait() }
 
     // "Best fact" badges (same logic as ride list)
     val rideBadges: Map<Long, List<Pair<String, Color>>> = remember(rides) {
@@ -896,19 +1294,60 @@ private fun ShiftDetailDialog(shift: Shift, rides: List<Ride>, zones: List<Zone>
         result
     }
 
+    var swipePreview by remember(shift.id) { mutableFloatStateOf(0f) }
+    val swipeOffset by animateFloatAsState(
+        targetValue = swipePreview.coerceIn(-72f, 72f),
+        label = "shiftSwipeOffset"
+    )
+    val swipeHintAlpha by animateFloatAsState(
+        targetValue = (kotlin.math.abs(swipePreview) / 120f).coerceIn(0f, 0.22f),
+        label = "shiftSwipeAlpha"
+    )
+
     Dialog(
         onDismissRequest = onDismiss,
         properties       = DialogProperties(usePlatformDefaultWidth = false),
     ) {
-        Box(Modifier.fillMaxSize().background(tc.background)) {
-
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(tc.background)
+                .pointerInput(onPrevShift, onNextShift) {
+                    var totalDrag = 0f
+                    detectHorizontalDragGestures(
+                        onDragStart = {
+                            totalDrag = 0f
+                            swipePreview = 0f
+                        },
+                        onHorizontalDrag = { change, dragAmount ->
+                            totalDrag += dragAmount
+                            swipePreview = totalDrag
+                            change.consume()
+                        },
+                        onDragEnd = {
+                            when {
+                                totalDrag > 90f -> onPrevShift?.invoke()
+                                totalDrag < -90f -> onNextShift?.invoke()
+                            }
+                            swipePreview = 0f
+                        },
+                        onDragCancel = { swipePreview = 0f },
+                    )
+                }
+        ) {
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .background(tc.accent.copy(alpha = swipeHintAlpha))
+            )
             Column(
                 Modifier
                     .fillMaxSize()
+                    .offset(x = swipeOffset.dp)
                     .verticalScroll(rememberScrollState())
                     .padding(bottom = 32.dp)
             ) {
-                // ── Top bar ──────────────────────────────────────
+                // -- Top bar --------------------------------------
                 Row(
                     Modifier
                         .fillMaxWidth()
@@ -931,11 +1370,19 @@ private fun ShiftDetailDialog(shift: Shift, rides: List<Ride>, zones: List<Zone>
                             color = tc.muted, fontSize = 12.sp
                         )
                     }
+                    Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                        IconButton(onClick = { onPrevShift?.invoke() }, enabled = onPrevShift != null) {
+                            Icon(Icons.Default.ChevronLeft, null, tint = if (onPrevShift != null) tc.accent else tc.muted.copy(alpha = 0.35f))
+                        }
+                        IconButton(onClick = { onNextShift?.invoke() }, enabled = onNextShift != null) {
+                            Icon(Icons.Default.ChevronRight, null, tint = if (onNextShift != null) tc.accent else tc.muted.copy(alpha = 0.35f))
+                        }
+                    }
                 }
 
                 Spacer(Modifier.height(12.dp))
 
-                // ── Earnings timeline chart ──────────────────────
+                // -- Earnings timeline chart ----------------------
                 val chartScale by rideVm.chartScale.collectAsState()
                 if (sortedRides.isNotEmpty()) {
                     // Use the actual shift duration for completed shifts (better X-axis fit)
@@ -945,6 +1392,7 @@ private fun ShiftDetailDialog(shift: Shift, rides: List<Ride>, zones: List<Zone>
                     Box(Modifier.padding(horizontal = 12.dp).fillMaxWidth()) {
                         ShiftEarningsChart(
                             rides                 = sortedRides,
+                            pauseSessions         = pauseSessions,
                             shiftStartMs          = shift.startTime,
                             shiftEndMs            = if (shift.endTime > 0) shift.endTime
                                                     else System.currentTimeMillis(),
@@ -957,7 +1405,7 @@ private fun ShiftDetailDialog(shift: Shift, rides: List<Ride>, zones: List<Zone>
                     Spacer(Modifier.height(10.dp))
                 }
 
-                // ── Financial summary ────────────────────────────
+                // -- Financial summary ----------------------------
                 DetailSection(st.detail.financialSection, tc) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                         DetailStat(settings.formatPrice(totalRevenue), st.grossRevenue,  tc.textPrimary, tc)
@@ -979,12 +1427,12 @@ private fun ShiftDetailDialog(shift: Shift, rides: List<Ride>, zones: List<Zone>
 
                 Spacer(Modifier.height(10.dp))
 
-                // ── Zone breakdown ───────────────────────────────
+                // -- Zone breakdown -------------------------------
                 ShiftZoneStatsSection(rides = rides, zones = zones)
 
                 Spacer(Modifier.height(10.dp))
 
-                // ── Statistics ───────────────────────────────────
+                // -- Statistics -----------------------------------
                 DetailSection(st.detail.statsSection, tc) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                         DetailStat("${rides.size}", st.ridesLabel, tc.accent, tc)
@@ -999,22 +1447,62 @@ private fun ShiftDetailDialog(shift: Shift, rides: List<Ride>, zones: List<Zone>
                         DetailStat("%.1f km".format(shiftKm), st.detail.shiftKmLabel, tc.muted, tc)
                         DetailStat("%.0f%%".format(clientRatio), st.detail.clientRatioLabel, tc.green, tc)
                     }
-                    if (maxSpeed > 0 || avgSpeed > 0) {
+                    Spacer(Modifier.height(10.dp))
+                    HorizontalDivider(color = tc.surface)
+                    Spacer(Modifier.height(10.dp))
+                    longestZoneWait?.let { wait ->
+                        val waitStart = sdfTime.format(Date(wait.startTime))
+                        val waitEnd = sdfTime.format(Date(wait.endTime))
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .background(tc.cardAlt.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    "Най-дълго чакане без поръчка",
+                                    color = tc.textPrimary,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                Text(
+                                    "${wait.zoneName}  •  $waitStart - $waitEnd",
+                                    color = tc.muted,
+                                    fontSize = 10.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                formatDurationForShiftHistory(wait.durationMs),
+                                color = tc.accent,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                        }
+                    } ?: Text(
+                        "Няма записано чакане по зона",
+                        color = tc.muted,
+                        fontSize = 11.sp,
+                    )
+                    if (maxSpeed > 0) {
                         Spacer(Modifier.height(10.dp))
                         HorizontalDivider(color = tc.surface)
                         Spacer(Modifier.height(10.dp))
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                            if (maxSpeed > 0)
-                                DetailStat("%.0f km/h".format(maxSpeed), st.detail.maxSpeedLabel, tc.textPrimary, tc)
-                            if (avgSpeed > 0)
-                                DetailStat("%.0f km/h".format(avgSpeed), st.detail.avgSpeedLabel, tc.muted, tc)
+                            DetailStat("%.0f km/h".format(maxSpeed), st.detail.maxSpeedLabel, tc.textPrimary, tc)
                         }
                     }
                 }
 
                 Spacer(Modifier.height(10.dp))
 
-                // ── Time breakdown ───────────────────────────────
+                // -- Time breakdown -------------------------------
                 DetailSection(st.detail.timeSection, tc) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                         val shiftDurStr = if (shiftDurH > 0)
@@ -1031,7 +1519,7 @@ private fun ShiftDetailDialog(shift: Shift, rides: List<Ride>, zones: List<Zone>
 
                 Spacer(Modifier.height(10.dp))
 
-                // ── All rides ────────────────────────────────────
+                // -- All rides ------------------------------------
                 DetailSection(st.detail.allRidesSection, tc) {
                     sortedRides.forEachIndexed { idx, ride ->
                         val durationMin = if (ride.endTime > ride.startTime)
@@ -1103,15 +1591,24 @@ private fun ShiftDetailDialog(shift: Shift, rides: List<Ride>, zones: List<Zone>
                                 }
                                 if (badges.isNotEmpty()) {
                                     Spacer(Modifier.height(4.dp))
-                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        modifier = Modifier.horizontalScroll(rememberScrollState())
+                                    ) {
                                         badges.forEach { (text, color) ->
                                             Box(
                                                 Modifier
                                                     .background(color.copy(alpha = 0.18f), RoundedCornerShape(4.dp))
                                                     .padding(horizontal = 5.dp, vertical = 2.dp)
                                             ) {
-                                                Text(text, color = color, fontSize = 9.sp,
-                                                    fontWeight = FontWeight.SemiBold)
+                                                Text(
+                                                    text,
+                                                    color = color,
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    maxLines = 1,
+                                                    softWrap = false,
+                                                )
                                             }
                                         }
                                     }

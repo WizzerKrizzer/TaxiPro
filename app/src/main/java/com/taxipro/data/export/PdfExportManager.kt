@@ -83,7 +83,12 @@ class PdfExportManager(private val context: Context) {
         val totalTips       = rides.sumOf { it.tip }
         val totalGrand      = totalRevenue + totalTips
         val totalClientKm   = rides.sumOf { it.kilometers }
-        val totalShiftKm    = completedShifts.sumOf { it.totalKm }.let { if (it < 1.0) totalClientKm else it }
+        val shiftClientKmMap = rides.filter { it.shiftId > 0L }.groupBy { it.shiftId }.mapValues { (_, shiftRides) ->
+            shiftRides.sumOf { it.kilometers }
+        }
+        val totalShiftKm    = completedShifts.sumOf { shift ->
+            effectiveShiftKm(shift.totalKm, shiftClientKmMap[shift.id] ?: 0.0)
+        }.let { if (it < 1.0) totalClientKm else it }
         val cardRides       = rides.filter { it.paymentMethod == "CARD" }
         val cashRides       = rides.filter { it.paymentMethod != "CARD" }
         val cardPct         = if (rides.isNotEmpty()) cardRides.size * 100 / rides.size else 0
@@ -240,7 +245,8 @@ class PdfExportManager(private val context: Context) {
                 val sRev        = shiftRides.sumOf { it.price }
                 val sTips       = shiftRides.sumOf { it.tip }
                 val sGrand      = sRev + sTips
-                val sFuelCost   = shift.totalKm * avgFuelRate
+                val shiftTotalKm = effectiveShiftKm(shift.totalKm, shiftRides.sumOf { it.kilometers })
+                val sFuelCost   = shiftTotalKm * avgFuelRate
                 val sTax        = shiftRides.sumOf { it.price * it.taxPercent / 100.0 }
                 val sNet        = sGrand - sFuelCost - sTax
                 val sCardRides  = shiftRides.count { it.paymentMethod == "CARD" }
@@ -261,7 +267,7 @@ class PdfExportManager(private val context: Context) {
                     ML, y, shP
                 )
                 y += 13f
-                kv2("Rides",         "${shiftRides.size}",              "Total km",   "%.1f km".format(shift.totalKm))
+                kv2("Rides",         "${shiftRides.size}",              "Total km",   "%.1f km".format(shiftTotalKm))
                 kv2("Revenue",       settings.formatPrice(sRev),        "Tips",       settings.formatPrice(sTips))
                 kv2("Grand total",   settings.formatPrice(sGrand),      "Net profit", settings.formatPrice(sNet), pGreen(), pGreen())
                 kv2("Avg/ride",      settings.formatPrice(sAvgRide),    "Avg/hour",   settings.formatPrice(sAvgHour))

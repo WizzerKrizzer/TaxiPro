@@ -9,6 +9,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -21,6 +22,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -34,12 +36,38 @@ import com.google.maps.android.compose.*
 import com.taxipro.data.db.Ride
 import com.taxipro.data.db.Zone
 import com.taxipro.data.db.formatPrice
+import com.taxipro.data.db.primaryZoneLabel
+import com.taxipro.data.db.rideEndLatLng
 import com.taxipro.data.db.rideRouteLabels
+import com.taxipro.data.db.rideStartLatLng
+import com.taxipro.data.db.simplifyRideAddress
 import com.taxipro.ui.theme.LocalStrings
 import com.taxipro.ui.theme.LocalSettings
 import com.taxipro.ui.viewmodel.RideViewModel
 import java.text.SimpleDateFormat
 import java.util.*
+
+private data class RideHistoryZoneRoute(
+    val from: String,
+    val to: String,
+)
+
+private enum class RideHistorySort {
+    NEWEST, REVENUE, DURATION, KM, WAIT, TIP
+}
+
+private fun rideHistoryZoneRoute(
+    ride: Ride,
+    zones: List<Zone>,
+    outsideLabel: String,
+): RideHistoryZoneRoute {
+    val (sLat, sLng) = rideStartLatLng(ride) ?: (0.0 to 0.0)
+    val (eLat, eLng) = rideEndLatLng(ride) ?: (0.0 to 0.0)
+    return RideHistoryZoneRoute(
+        from = primaryZoneLabel(sLat, sLng, zones, outsideLabel) ?: outsideLabel,
+        to = primaryZoneLabel(eLat, eLng, zones, outsideLabel) ?: outsideLabel,
+    )
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -55,16 +83,73 @@ fun RideHistoryScreen(vm: RideViewModel) {
     val initWeek     = remember { pfCurrentWeekRange() }
     var filterFromMs by remember { mutableStateOf<Long?>(initWeek.first) }
     var filterToMs   by remember { mutableStateOf<Long?>(initWeek.second) }
+    var sortBy       by remember { mutableStateOf(RideHistorySort.NEWEST) }
+    var sortAsc      by remember { mutableStateOf(false) }
+    var fromZoneName by remember { mutableStateOf<String?>(null) }
+    var toZoneName   by remember { mutableStateOf<String?>(null) }
+    var kmFilterText       by remember { mutableStateOf("") }
+    var fareFilterText     by remember { mutableStateOf("") }
+    var durationFilterText by remember { mutableStateOf("") }
+    var kmFilterIsMin       by remember { mutableStateOf(true) }
+    var fareFilterIsMin     by remember { mutableStateOf(true) }
+    var durationFilterIsMin by remember { mutableStateOf(true) }
+    var appliedKmFilterText       by remember { mutableStateOf("") }
+    var appliedFareFilterText     by remember { mutableStateOf("") }
+    var appliedDurationFilterText by remember { mutableStateOf("") }
+    var appliedKmFilterIsMin       by remember { mutableStateOf(true) }
+    var appliedFareFilterIsMin     by remember { mutableStateOf(true) }
+    var appliedDurationFilterIsMin by remember { mutableStateOf(true) }
 
-    val displayed = if (filterFromMs != null && filterToMs != null)
-        allRides.filter { it.startTime in filterFromMs!!..filterToMs!! }
-    else
-        allRides
+    val kmFilter       = appliedKmFilterText.replace(",", ".").toDoubleOrNull()
+    val fareFilter     = appliedFareFilterText.replace(",", ".").toDoubleOrNull()
+    val durationFilter = appliedDurationFilterText.replace(",", ".").toDoubleOrNull()
+    val minKm       = kmFilter.takeIf { appliedKmFilterIsMin }
+    val minFare     = fareFilter.takeIf { appliedFareFilterIsMin }
+    val minDuration = durationFilter.takeIf { appliedDurationFilterIsMin }
+    val maxKm       = kmFilter.takeIf { !appliedKmFilterIsMin }
+    val maxFare     = fareFilter.takeIf { !appliedFareFilterIsMin }
+    val maxDuration = durationFilter.takeIf { !appliedDurationFilterIsMin }
+
+    val filteredRides = remember(
+        allRides, allZones, filterFromMs, filterToMs, fromZoneName, toZoneName,
+        minKm, minFare, minDuration, maxKm, maxFare, maxDuration, st.zones.outsideZones,
+    ) {
+        allRides.filter { ride ->
+            val inPeriod = filterFromMs == null || filterToMs == null ||
+                ride.startTime in filterFromMs!!..filterToMs!!
+            val route = if (fromZoneName != null || toZoneName != null) {
+                rideHistoryZoneRoute(ride, allZones, st.zones.outsideZones)
+            } else null
+            val durationMin = ((ride.endTime - ride.startTime).coerceAtLeast(0L)) / 60_000.0
+            inPeriod &&
+                (fromZoneName == null || route?.from == fromZoneName) &&
+                (toZoneName == null || route?.to == toZoneName) &&
+                (minKm == null || ride.kilometers >= minKm) &&
+                (minFare == null || ride.price + ride.tip >= minFare) &&
+                (minDuration == null || durationMin >= minDuration) &&
+                (maxKm == null || ride.kilometers <= maxKm) &&
+                (maxFare == null || ride.price + ride.tip <= maxFare) &&
+                (maxDuration == null || durationMin <= maxDuration)
+        }
+    }
+    val displayed = remember(filteredRides, sortBy, sortAsc) {
+        val comparator = when (sortBy) {
+            RideHistorySort.NEWEST   -> compareBy<Ride> { it.startTime }
+            RideHistorySort.REVENUE  -> compareBy { it.price + it.tip }
+            RideHistorySort.DURATION -> compareBy { (it.endTime - it.startTime).coerceAtLeast(0L) }
+            RideHistorySort.KM       -> compareBy { it.kilometers }
+            RideHistorySort.WAIT     -> compareBy { it.waitMinutes }
+            RideHistorySort.TIP      -> compareBy { it.tip }
+        }
+        if (sortAsc) filteredRides.sortedWith(comparator)
+        else filteredRides.sortedWith(comparator.reversed())
+    }
 
     Column(
         Modifier
             .fillMaxSize()
             .background(tc.background)
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp)
     ) {
         Spacer(Modifier.height(16.dp))
@@ -73,6 +158,74 @@ fun RideHistoryScreen(vm: RideViewModel) {
 
         // ── Period filter ────────────────────────────────────
         PeriodFilterRow(onRangeChanged = { f, t -> filterFromMs = f; filterToMs = t })
+
+        RideHistoryAdvancedFilters(
+            zones = allZones,
+            outsideLabel = st.zones.outsideZones,
+            fromZoneName = fromZoneName,
+            toZoneName = toZoneName,
+            kmText = kmFilterText,
+            fareText = fareFilterText,
+            durationText = durationFilterText,
+            kmIsMin = kmFilterIsMin,
+            fareIsMin = fareFilterIsMin,
+            durationIsMin = durationFilterIsMin,
+            onFromSelected = { fromZoneName = it },
+            onToSelected = { toZoneName = it },
+            onKmChange = { kmFilterText = it },
+            onFareChange = { fareFilterText = it },
+            onDurationChange = { durationFilterText = it },
+            onToggleKmMode = {
+                kmFilterIsMin = !kmFilterIsMin
+                appliedKmFilterIsMin = kmFilterIsMin
+                if (kmFilterText.isNotBlank()) appliedKmFilterText = kmFilterText
+            },
+            onToggleFareMode = {
+                fareFilterIsMin = !fareFilterIsMin
+                appliedFareFilterIsMin = fareFilterIsMin
+                if (fareFilterText.isNotBlank()) appliedFareFilterText = fareFilterText
+            },
+            onToggleDurationMode = {
+                durationFilterIsMin = !durationFilterIsMin
+                appliedDurationFilterIsMin = durationFilterIsMin
+                if (durationFilterText.isNotBlank()) appliedDurationFilterText = durationFilterText
+            },
+            onApplyKm = {
+                appliedKmFilterText = kmFilterText
+                appliedKmFilterIsMin = kmFilterIsMin
+            },
+            onApplyFare = {
+                appliedFareFilterText = fareFilterText
+                appliedFareFilterIsMin = fareFilterIsMin
+            },
+            onApplyDuration = {
+                appliedDurationFilterText = durationFilterText
+                appliedDurationFilterIsMin = durationFilterIsMin
+            },
+            onClear = {
+                fromZoneName = null
+                toZoneName = null
+                kmFilterText = ""
+                fareFilterText = ""
+                durationFilterText = ""
+                kmFilterIsMin = true
+                fareFilterIsMin = true
+                durationFilterIsMin = true
+                appliedKmFilterText = ""
+                appliedFareFilterText = ""
+                appliedDurationFilterText = ""
+                appliedKmFilterIsMin = true
+                appliedFareFilterIsMin = true
+                appliedDurationFilterIsMin = true
+            },
+        )
+
+        RideHistorySortRow(
+            selected = sortBy,
+            ascending = sortAsc,
+            onSelected = { sortBy = it },
+            onToggleDirection = { sortAsc = !sortAsc },
+        )
 
         Row(
             Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 4.dp),
@@ -102,22 +255,24 @@ fun RideHistoryScreen(vm: RideViewModel) {
             }
         } else {
             Column(
-                Modifier.verticalScroll(rememberScrollState()),
+                Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 displayed.forEach { ride ->
-                    SwipeToDeleteBox(
-                        onDeleteRequest = { pendingDelete = { vm.deleteRide(ride) } }
-                    ) {
-                        HistoryRideCard(
-                            ride          = ride,
-                            zones         = allZones,
-                            isExpanded    = expandedId == ride.id,
-                            onToggle      = { expandedId = if (expandedId == ride.id) null else ride.id },
-                            onDelete      = { pendingDelete = { vm.deleteRide(ride) } },
-                            onEditRoute   = { editRouteRide = ride },
-                            onEditTipFare = { editTipFareRide = ride },
-                        )
+                    key(ride.id) {
+                        SwipeToDeleteBox(
+                            onDeleteRequest = { pendingDelete = { vm.deleteRide(ride) } }
+                        ) {
+                            HistoryRideCard(
+                                ride          = ride,
+                                zones         = allZones,
+                                isExpanded    = expandedId == ride.id,
+                                onToggle      = { expandedId = if (expandedId == ride.id) null else ride.id },
+                                onDelete      = { pendingDelete = { vm.deleteRide(ride) } },
+                                onEditRoute   = { editRouteRide = ride },
+                                onEditTipFare = { editTipFareRide = ride },
+                            )
+                        }
                     }
                 }
                 Spacer(Modifier.height(80.dp))
@@ -155,6 +310,265 @@ fun RideHistoryScreen(vm: RideViewModel) {
 }
 
 @Composable
+private fun RideHistorySortRow(
+    selected: RideHistorySort,
+    ascending: Boolean,
+    onSelected: (RideHistorySort) -> Unit,
+    onToggleDirection: () -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    var expanded by remember { mutableStateOf(false) }
+    val labels = mapOf(
+        RideHistorySort.NEWEST to "Дата",
+        RideHistorySort.REVENUE to "Оборот",
+        RideHistorySort.DURATION to "Време",
+        RideHistorySort.KM to "Км",
+        RideHistorySort.WAIT to "Престой",
+        RideHistorySort.TIP to "Бакшиш",
+    )
+    Row(
+        Modifier.fillMaxWidth().padding(top = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.weight(1f)) {
+            OutlinedButton(
+                onClick = { expanded = true },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = tc.accent),
+            ) {
+                Icon(Icons.Default.Sort, null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Сортирай: ${labels[selected]}", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, modifier = Modifier.background(tc.card)) {
+                labels.forEach { (sort, label) ->
+                    DropdownMenuItem(
+                        text = { Text(label, color = if (sort == selected) tc.accent else tc.textPrimary) },
+                        onClick = { onSelected(sort); expanded = false },
+                    )
+                }
+            }
+        }
+        OutlinedButton(
+            onClick = onToggleDirection,
+            shape = RoundedCornerShape(10.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = tc.accent),
+        ) {
+            Text(if (ascending) "↑" else "↓", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@Composable
+private fun RideHistoryAdvancedFilters(
+    zones: List<Zone>,
+    outsideLabel: String,
+    fromZoneName: String?,
+    toZoneName: String?,
+    kmText: String,
+    fareText: String,
+    durationText: String,
+    kmIsMin: Boolean,
+    fareIsMin: Boolean,
+    durationIsMin: Boolean,
+    onFromSelected: (String?) -> Unit,
+    onToSelected: (String?) -> Unit,
+    onKmChange: (String) -> Unit,
+    onFareChange: (String) -> Unit,
+    onDurationChange: (String) -> Unit,
+    onToggleKmMode: () -> Unit,
+    onToggleFareMode: () -> Unit,
+    onToggleDurationMode: () -> Unit,
+    onApplyKm: () -> Unit,
+    onApplyFare: () -> Unit,
+    onApplyDuration: () -> Unit,
+    onClear: () -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    val settings = LocalSettings.current
+    val options = remember(zones, outsideLabel) {
+        listOf<Pair<String?, String>>(null to "Всички") +
+            zones.map { it.name to it.name } +
+            (outsideLabel.takeIf { it.isNotBlank() }?.let { listOf(it to it) } ?: emptyList())
+    }
+    val hasFilters = fromZoneName != null || toZoneName != null ||
+        kmText.isNotBlank() || fareText.isNotBlank() || durationText.isNotBlank()
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = tc.card),
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Разширени филтри", color = tc.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                if (hasFilters) {
+                    TextButton(onClick = onClear, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                        Icon(Icons.Default.Clear, null, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Изчисти", fontSize = 11.sp)
+                    }
+                }
+            }
+
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                RideHistoryZoneDropdown(
+                    label = "От зона",
+                    selected = fromZoneName,
+                    options = options,
+                    modifier = Modifier.weight(1f),
+                    onSelected = onFromSelected,
+                )
+                RideHistoryZoneDropdown(
+                    label = "До зона",
+                    selected = toZoneName,
+                    options = options,
+                    modifier = Modifier.weight(1f),
+                    onSelected = onToSelected,
+                )
+            }
+
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                RideHistoryNumberFilter(
+                    label = "Км",
+                    value = kmText,
+                    suffix = settings.distanceUnit.shortLabel,
+                    isMin = kmIsMin,
+                    modifier = Modifier.weight(1f),
+                    onToggleMode = onToggleKmMode,
+                    onValueChange = onKmChange,
+                    onApply = onApplyKm,
+                )
+                RideHistoryNumberFilter(
+                    label = "Сума",
+                    value = fareText,
+                    suffix = settings.currency.symbol,
+                    isMin = fareIsMin,
+                    modifier = Modifier.weight(1f),
+                    onToggleMode = onToggleFareMode,
+                    onValueChange = onFareChange,
+                    onApply = onApplyFare,
+                )
+                RideHistoryNumberFilter(
+                    label = "Време",
+                    value = durationText,
+                    suffix = "мин",
+                    isMin = durationIsMin,
+                    modifier = Modifier.weight(1f),
+                    onToggleMode = onToggleDurationMode,
+                    onValueChange = onDurationChange,
+                    onApply = onApplyDuration,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RideHistoryZoneDropdown(
+    label: String,
+    selected: String?,
+    options: List<Pair<String?, String>>,
+    modifier: Modifier = Modifier,
+    onSelected: (String?) -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    var expanded by remember { mutableStateOf(false) }
+    Box(modifier) {
+        OutlinedButton(
+            onClick = { expanded = true },
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(10.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = tc.accent),
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+        ) {
+            Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
+                Text(label, color = tc.muted, fontSize = 9.sp)
+                Text(selected ?: "Всички", color = tc.textPrimary, fontSize = 12.sp, maxLines = 1)
+            }
+            Icon(Icons.Default.ArrowDropDown, null, tint = tc.accent)
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.background(tc.card),
+        ) {
+            options.forEach { (value, text) ->
+                DropdownMenuItem(
+                    text = {
+                        Text(text, color = if (value == selected) tc.accent else tc.textPrimary, fontSize = 13.sp)
+                    },
+                    onClick = {
+                        onSelected(value)
+                        expanded = false
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RideHistoryNumberFilter(
+    label: String,
+    value: String,
+    suffix: String,
+    isMin: Boolean,
+    modifier: Modifier = Modifier,
+    onToggleMode: () -> Unit,
+    onValueChange: (String) -> Unit,
+    onApply: () -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    OutlinedTextField(
+        value = value,
+        onValueChange = { raw ->
+            onValueChange(raw.filter { it.isDigit() || it == '.' || it == ',' })
+        },
+        modifier = modifier,
+        label = {
+            Text(
+                label,
+                color = tc.muted,
+                fontSize = 10.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
+        leadingIcon = {
+            TextButton(
+                onClick = onToggleMode,
+                contentPadding = PaddingValues(horizontal = 4.dp),
+                modifier = Modifier.width(44.dp),
+            ) {
+                Text(if (isMin) "Мин" else "Макс", color = tc.accent, fontSize = 10.sp)
+            }
+        },
+        suffix = { Text(suffix, color = tc.muted, fontSize = 10.sp) },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(
+            keyboardType = KeyboardType.Decimal,
+            imeAction = ImeAction.Done,
+        ),
+        keyboardActions = KeyboardActions(onDone = { onApply() }),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = tc.accent,
+            unfocusedBorderColor = tc.surface,
+            focusedTextColor = tc.textPrimary,
+            unfocusedTextColor = tc.textPrimary,
+            cursorColor = tc.accent,
+            focusedLabelColor = tc.accent,
+        ),
+    )
+}
+
+@Composable
 private fun HistoryRideCard(
     ride: Ride,
     zones: List<Zone>,
@@ -176,6 +590,15 @@ private fun HistoryRideCard(
     // Parse stored route points once
     val routePoints = remember(ride.id) { parseRoutePoints(ride.routePointsJson) }
     var showMenu by remember { mutableStateOf(false) }
+    val durationMinutes = ((ride.endTime - ride.startTime).coerceAtLeast(0L)) / 60_000L
+    val fromAddress = simplifyRideAddress(ride.fromAddress)
+    val toAddress = simplifyRideAddress(ride.toAddress)
+    val addressRoute = when {
+        fromAddress.isNotEmpty() && toAddress.isNotEmpty() -> "$fromAddress → $toAddress"
+        fromAddress.isNotEmpty() -> fromAddress
+        toAddress.isNotEmpty() -> toAddress
+        else -> ""
+    }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -301,6 +724,33 @@ private fun HistoryRideCard(
             ) {
                 Column {
                     HorizontalDivider(color = tc.muted.copy(alpha = 0.15f))
+                    Column(
+                        Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        if (zoneLabel.isNotEmpty()) {
+                            RideHistoryDetailRow("Зони", zoneLabel)
+                        }
+                        if (addressRoute.isNotEmpty()) {
+                            RideHistoryDetailRow("Адрес", addressRoute)
+                        }
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            RideHistoryDetailChip(
+                                label = "Времетраене",
+                                value = "$durationMinutes мин",
+                                modifier = Modifier.weight(1f),
+                            )
+                            RideHistoryDetailChip(
+                                label = "Общо",
+                                value = settings.formatPrice(ride.price + ride.tip),
+                                modifier = Modifier.weight(1f),
+                                valueColor = tc.accent,
+                            )
+                        }
+                    }
                     if (routePoints.size >= 2) {
                         PremiumGate(
                             modifier    = Modifier.fillMaxWidth(),
@@ -322,6 +772,57 @@ private fun HistoryRideCard(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun RideHistoryDetailRow(label: String, value: String) {
+    val tc = LocalThemeColors.current
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text(
+            label,
+            color = tc.accent,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            modifier = Modifier.width(40.dp),
+        )
+        Text(
+            value,
+            color = tc.textPrimary,
+            fontSize = 12.sp,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun RideHistoryDetailChip(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+    valueColor: Color = LocalThemeColors.current.textPrimary,
+) {
+    val tc = LocalThemeColors.current
+    Column(
+        modifier
+            .background(tc.cardAlt, RoundedCornerShape(10.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+    ) {
+        Text(label, color = tc.muted, fontSize = 10.sp)
+        Text(
+            value,
+            color = valueColor,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            fontFamily = FontFamily.Monospace,
+        )
     }
 }
 
@@ -550,3 +1051,4 @@ internal fun parseRoutePoints(json: String): List<LatLng> {
         emptyList()
     }
 }
+

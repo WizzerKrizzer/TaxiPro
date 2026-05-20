@@ -20,16 +20,22 @@ import com.taxipro.data.db.ExpenseType
 import com.taxipro.data.db.Ride
 import com.taxipro.data.db.Shift
 import com.taxipro.data.db.TariffExpense
+import com.taxipro.data.db.Zone
+import com.taxipro.data.db.effectiveShiftKm
 import com.taxipro.data.db.expType
 import com.taxipro.data.db.findZone
 import com.taxipro.data.db.freq
 import com.taxipro.data.db.formatPrice
 import com.taxipro.data.db.formatDistance
 import com.taxipro.data.db.longestZoneWait
+import com.taxipro.data.db.primaryZoneLabel
 import com.taxipro.data.db.rideEndLatLng
 import com.taxipro.data.db.rideStartLatLng
+import com.taxipro.data.db.zoneDisplayName
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.ImeAction
 import com.taxipro.data.db.SettingsRepository
 import kotlinx.coroutines.launch
 import com.taxipro.ui.theme.LocalStrings
@@ -42,6 +48,20 @@ private fun formatStatsDuration(totalMs: Long): String {
     val hours = totalMinutes / 60
     val minutes = totalMinutes % 60
     return if (hours > 0) "${hours}ч ${minutes}м" else "${minutes}м"
+}
+
+private data class StatsRouteFilter(
+    val from: String,
+    val to: String,
+)
+
+private fun statsRouteFilter(ride: Ride, zones: List<Zone>, outsideLabel: String): StatsRouteFilter {
+    val (sLat, sLng) = rideStartLatLng(ride) ?: (0.0 to 0.0)
+    val (eLat, eLng) = rideEndLatLng(ride) ?: (0.0 to 0.0)
+    return StatsRouteFilter(
+        from = primaryZoneLabel(sLat, sLng, zones, outsideLabel) ?: outsideLabel,
+        to = primaryZoneLabel(eLat, eLng, zones, outsideLabel) ?: outsideLabel,
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -64,6 +84,20 @@ fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
     val initWeek     = remember { pfCurrentWeekRange() }
     var filterFromMs by remember { mutableStateOf<Long?>(initWeek.first) }
     var filterToMs   by remember { mutableStateOf<Long?>(initWeek.second) }
+    var fromZoneName by remember { mutableStateOf<String?>(null) }
+    var toZoneName   by remember { mutableStateOf<String?>(null) }
+    var kmFilterText       by remember { mutableStateOf("") }
+    var fareFilterText     by remember { mutableStateOf("") }
+    var durationFilterText by remember { mutableStateOf("") }
+    var kmFilterIsMin       by remember { mutableStateOf(true) }
+    var fareFilterIsMin     by remember { mutableStateOf(true) }
+    var durationFilterIsMin by remember { mutableStateOf(true) }
+    var appliedKmFilterText       by remember { mutableStateOf("") }
+    var appliedFareFilterText     by remember { mutableStateOf("") }
+    var appliedDurationFilterText by remember { mutableStateOf("") }
+    var appliedKmFilterIsMin       by remember { mutableStateOf(true) }
+    var appliedFareFilterIsMin     by remember { mutableStateOf(true) }
+    var appliedDurationFilterIsMin by remember { mutableStateOf(true) }
 
     val now   = System.currentTimeMillis()
     val dayMs = 86_400_000L
@@ -85,10 +119,39 @@ fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
         base
     }
 
-    val filtered = if (filterFromMs != null && filterToMs != null)
+    val kmFilter       = appliedKmFilterText.replace(",", ".").toDoubleOrNull()
+    val fareFilter     = appliedFareFilterText.replace(",", ".").toDoubleOrNull()
+    val durationFilter = appliedDurationFilterText.replace(",", ".").toDoubleOrNull()
+    val minKm       = kmFilter.takeIf { appliedKmFilterIsMin }
+    val minFare     = fareFilter.takeIf { appliedFareFilterIsMin }
+    val minDuration = durationFilter.takeIf { appliedDurationFilterIsMin }
+    val maxKm       = kmFilter.takeIf { !appliedKmFilterIsMin }
+    val maxFare     = fareFilter.takeIf { !appliedFareFilterIsMin }
+    val maxDuration = durationFilter.takeIf { !appliedDurationFilterIsMin }
+
+    val dateFiltered = if (filterFromMs != null && filterToMs != null)
         allRides.filter { it.logicalTime() in filterFromMs!!..filterToMs!! }
     else
         allRides
+    val filtered = remember(
+        dateFiltered, allZones, fromZoneName, toZoneName, minKm, minFare, minDuration,
+        maxKm, maxFare, maxDuration, st.zones.outsideZones,
+    ) {
+        dateFiltered.filter { ride ->
+            val route = if (fromZoneName != null || toZoneName != null) {
+                statsRouteFilter(ride, allZones, st.zones.outsideZones)
+            } else null
+            val durationMin = ((ride.endTime - ride.startTime).coerceAtLeast(0L)) / 60_000.0
+            (fromZoneName == null || route?.from == fromZoneName) &&
+                (toZoneName == null || route?.to == toZoneName) &&
+                (minKm == null || ride.kilometers >= minKm) &&
+                (minFare == null || ride.price + ride.tip >= minFare) &&
+                (minDuration == null || durationMin >= minDuration) &&
+                (maxKm == null || ride.kilometers <= maxKm) &&
+                (maxFare == null || ride.price + ride.tip <= maxFare) &&
+                (maxDuration == null || durationMin <= maxDuration)
+        }
+    }
     val filteredZoneWaits = if (filterFromMs != null && filterToMs != null)
         allZoneWaitSessions.filter { it.startTime in filterFromMs!!..filterToMs!! }
     else
@@ -104,7 +167,12 @@ fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
 
     // Total km including dead miles: sum shift.totalKm for shifts in filtered set
     val filteredShiftIds = filtered.map { it.shiftId }.filter { it > 0L }.toSet()
-    val shiftKmMap       = allShifts.associate { it.id to it.totalKm }
+    val clientKmByShift  = filtered.filter { it.shiftId > 0L }.groupBy { it.shiftId }.mapValues { (_, rides) ->
+        rides.sumOf { it.kilometers }
+    }
+    val shiftKmMap       = allShifts.associate { shift ->
+        shift.id to effectiveShiftKm(shift.totalKm, clientKmByShift[shift.id] ?: 0.0)
+    }
     val totalShiftKm     = run {
         val fromShifts = filteredShiftIds.sumOf { id -> shiftKmMap[id] ?: 0.0 }
         // Rides without a shiftId contribute their client km as best estimate
@@ -116,13 +184,12 @@ fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
             .sumOf { it.kilometers }
         fromShifts + noShiftKm + calcInShift
     }
-    val netProfit  = filtered.sumOf { ride ->
-        val tax     = ride.price * ride.taxPercent / 100.0
-        // Only GPS-measured km go toward fuel; adjustment km are not real distance driven
-        val gpsKm   = ride.kilometers - ride.adjustmentKm
-        val fuel    = gpsKm * ride.fuelCostPerKm
-        ride.price + ride.tip - tax - fuel
-    }
+    val taxCost        = filtered.sumOf { it.price * it.taxPercent / 100.0 }
+    val totalGpsKm     = filtered.sumOf { it.kilometers - it.adjustmentKm }
+    // Weighted average fuel rate from the rides in the selected period.
+    val clientFuelCost = filtered.sumOf { (it.kilometers - it.adjustmentKm) * it.fuelCostPerKm }
+    val avgFuelRate    = if (totalGpsKm > 0) clientFuelCost / totalGpsKm else 0.0
+    val fuelCost       = totalShiftKm * avgFuelRate
 
     // Разпределение по час
     val hourMap = mutableMapOf<Int, Int>()
@@ -145,8 +212,8 @@ fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
         val (eLat, eLng) = endCoords   ?: (0.0 to 0.0)
         val fromZone = findZone(sLat, sLng, allZones)
         val toZone   = findZone(eLat, eLng, allZones)
-        val fromLabel = fromZone?.name ?: if (startCoords != null) outsideLabel else outsideLabel
-        val toLabel   = toZone?.name   ?: if (endCoords   != null) outsideLabel else outsideLabel
+        val fromLabel = fromZone?.let { zoneDisplayName(it, allZones) } ?: if (startCoords != null) outsideLabel else outsideLabel
+        val toLabel   = toZone?.let { zoneDisplayName(it, allZones) }   ?: if (endCoords   != null) outsideLabel else outsideLabel
         val key = "$fromLabel → $toLabel"
         val cur = routeMap[key] ?: Pair(0, 0.0)
         routeMap[key] = Pair(cur.first + 1, cur.second + ride.price)
@@ -214,12 +281,62 @@ fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
     val avgKmPerShiftAllTime = remember(completedShiftsAllTime, ridesByShiftAllTime) {
         if (completedShiftsAllTime.isEmpty()) 0.0
         else completedShiftsAllTime.sumOf { shift ->
-            shift.totalKm + ridesByShiftAllTime[shift.id]
-                .orEmpty()
-                .filter { it.startTime == it.endTime }
-                .sumOf { it.kilometers }
+            val shiftClientKm = ridesByShiftAllTime[shift.id].orEmpty().sumOf { it.kilometers }
+            effectiveShiftKm(shift.totalKm, shiftClientKm)
         } / completedShiftsAllTime.size
     }
+
+    val nowMsClamped = System.currentTimeMillis()
+    val periodStartMs = when {
+        filtered.isEmpty() -> null
+        filterFromMs != null -> filterFromMs
+        else -> filtered.minOfOrNull { it.startTime }
+    }
+    val periodEndMs = when {
+        filtered.isEmpty() -> null
+        filterToMs != null -> minOf(filterToMs!!, nowMsClamped)
+        else -> nowMsClamped
+    }
+    val msPerMonth = 30.44 * 86_400_000.0
+    val filteredMonths: Double = when {
+        periodStartMs == null || periodEndMs == null -> 0.0
+        else -> ((periodEndMs - periodStartMs).coerceAtLeast(1L)) / msPerMonth
+    }
+    val rideCount    = filtered.size
+    val shiftCount   = uniqueShifts.coerceAtLeast(if (rideCount > 0) 1 else 0)
+    val workedDaysCount = filtered.map { startOfDay(it.startTime) }.distinct().size
+    val workedWeeksCount = filtered.map { startOfWeek(it.startTime) }.distinct().size
+    data class CustomExpRow(val name: String, val cost: Double)
+    val customRows = allExpenses
+        .groupBy { it.name }
+        .map { (_, exps) ->
+            val exp  = exps.first()
+            val cost = when (exp.freq) {
+                ExpenseFrequency.PER_DAY -> if (exp.expType == ExpenseType.FIXED) {
+                    exp.amount * workedDaysCount
+                } else {
+                    exp.amount / 100.0 * total
+                }
+                ExpenseFrequency.PER_WEEK -> if (exp.expType == ExpenseType.FIXED) {
+                    exp.amount * workedWeeksCount
+                } else {
+                    exp.amount / 100.0 * total
+                }
+                ExpenseFrequency.PER_RIDE  -> if (exp.expType == ExpenseType.FIXED)
+                    exp.amount * rideCount
+                    else exp.amount / 100.0 * total
+                ExpenseFrequency.PER_SHIFT -> if (exp.expType == ExpenseType.FIXED)
+                    exp.amount * shiftCount
+                    else exp.amount / 100.0 * total
+                ExpenseFrequency.PER_MONTH -> if (exp.expType == ExpenseType.FIXED)
+                    exp.amount * filteredMonths
+                    else exp.amount / 100.0 * total
+            }
+            CustomExpRow(exp.name, cost)
+        }
+        .filter { it.cost > 0.0 }
+    val totalCustomCost = customRows.sumOf { it.cost }
+    val adjustedNet     = total - fuelCost - taxCost - totalCustomCost
 
     // ── Goal state ────────────────────────────────────────────
     val scope = rememberCoroutineScope()
@@ -269,6 +386,67 @@ fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
         PeriodFilterRow(
             onRangeChanged  = { f, t -> filterFromMs = f; filterToMs = t },
             onPeriodChanged = { activePeriod = it },
+        )
+
+        StatsAdvancedFilters(
+            zones = allZones,
+            outsideLabel = st.zones.outsideZones,
+            fromZoneName = fromZoneName,
+            toZoneName = toZoneName,
+            kmText = kmFilterText,
+            fareText = fareFilterText,
+            durationText = durationFilterText,
+            kmIsMin = kmFilterIsMin,
+            fareIsMin = fareFilterIsMin,
+            durationIsMin = durationFilterIsMin,
+            onFromSelected = { fromZoneName = it },
+            onToSelected = { toZoneName = it },
+            onKmChange = { kmFilterText = it },
+            onFareChange = { fareFilterText = it },
+            onDurationChange = { durationFilterText = it },
+            onToggleKmMode = {
+                kmFilterIsMin = !kmFilterIsMin
+                appliedKmFilterIsMin = kmFilterIsMin
+                if (kmFilterText.isNotBlank()) appliedKmFilterText = kmFilterText
+            },
+            onToggleFareMode = {
+                fareFilterIsMin = !fareFilterIsMin
+                appliedFareFilterIsMin = fareFilterIsMin
+                if (fareFilterText.isNotBlank()) appliedFareFilterText = fareFilterText
+            },
+            onToggleDurationMode = {
+                durationFilterIsMin = !durationFilterIsMin
+                appliedDurationFilterIsMin = durationFilterIsMin
+                if (durationFilterText.isNotBlank()) appliedDurationFilterText = durationFilterText
+            },
+            onApplyKm = {
+                appliedKmFilterText = kmFilterText
+                appliedKmFilterIsMin = kmFilterIsMin
+            },
+            onApplyFare = {
+                appliedFareFilterText = fareFilterText
+                appliedFareFilterIsMin = fareFilterIsMin
+            },
+            onApplyDuration = {
+                appliedDurationFilterText = durationFilterText
+                appliedDurationFilterIsMin = durationFilterIsMin
+            },
+            onClear = {
+                fromZoneName = null
+                toZoneName = null
+                kmFilterText = ""
+                fareFilterText = ""
+                durationFilterText = ""
+                kmFilterIsMin = true
+                fareFilterIsMin = true
+                durationFilterIsMin = true
+                appliedKmFilterText = ""
+                appliedFareFilterText = ""
+                appliedDurationFilterText = ""
+                appliedKmFilterIsMin = true
+                appliedFareFilterIsMin = true
+                appliedDurationFilterIsMin = true
+            },
         )
 
         // ── Premium gate: historical data beyond current week ──
@@ -353,14 +531,15 @@ fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             StatCard2(st.totalRevenue, settings.formatPrice(total),
                 "${filtered.size} ${st.ridesLabel}", tc.accent, Modifier.weight(1f))
-            StatCard2(st.netProfit, settings.formatPrice(netProfit),
+            StatCard2(st.netProfit, settings.formatPrice(adjustedNet),
                 st.afterCosts, tc.green, Modifier.weight(1f))
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            val hasTrackedShiftKm = filteredShiftIds.isNotEmpty() || totalShiftKm > totalKm + 0.05
             StatCard2(
                 st.totalKm,
-                "%.1f km".format(if (totalShiftKm > totalKm + 0.05) totalShiftKm else totalKm),
-                if (totalShiftKm > totalKm + 0.05)
+                "%.1f km".format(if (hasTrackedShiftKm) totalShiftKm else totalKm),
+                if (hasTrackedShiftKm)
                     "%.1f km ${st.withClients}".format(totalKm)
                 else st.traveled,
                 tc.blue, Modifier.weight(1f)
@@ -803,7 +982,14 @@ fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
                     Modifier.fillMaxWidth().padding(vertical = 6.dp),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text(k, color = tc.muted, fontSize = 13.sp)
+                    Text(
+                        k,
+                        color = tc.muted,
+                        fontSize = 13.sp,
+                        modifier = Modifier.weight(1f).padding(end = 12.dp),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                     Text(v, color = tc.textPrimary, fontSize = 13.sp,
                         fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
                 }
@@ -844,56 +1030,9 @@ fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
 
         // ── Разбивка разходи ──
         StatsSection(st.breakdownTitle) {
-            val taxCost        = filtered.sumOf { it.price * it.taxPercent / 100.0 }
-            val totalGpsKm     = filtered.sumOf { it.kilometers - it.adjustmentKm }
-            // Average fuel rate from rides, applied to TOTAL km (incl. dead miles)
-            val clientFuelCost = filtered.sumOf { (it.kilometers - it.adjustmentKm) * it.fuelCostPerKm }
-            val avgFuelRate    = if (totalGpsKm > 0) clientFuelCost / totalGpsKm else 0.0
-            val fuelCost       = (if (totalShiftKm > totalGpsKm + 0.05) totalShiftKm else totalGpsKm) * avgFuelRate
             val avgTaxRate  = if (total > 0) taxCost / total * 100.0 else 0.0
             val fuelLbl     = "${st.fuelLabel} (~%.2f/${settings.distanceUnit.shortLabel})".format(avgFuelRate)
             val taxLbl      = "${st.taxInsurance} (~%.1f%%)".format(avgTaxRate)
-
-            // ── Custom expenses per tariff ──────────────────────────
-            // Determine fractional months covered by the filter range so that
-            // a $190/month expense shows ~$44 for a week and ~$6 for a day.
-            val msPerMonth = 30.44 * 86_400_000.0
-            val filteredMonths: Double = when {
-                filtered.isEmpty() -> 0.0
-                filterFromMs != null && filterToMs != null ->
-                    ((filterToMs!! - filterFromMs!!).coerceAtLeast(1L)) / msPerMonth
-                else -> {
-                    val minMs = filtered.minOf { it.startTime }
-                    val maxMs = filtered.maxOf { it.startTime }
-                    ((maxMs - minMs + 86_400_000L).coerceAtLeast(86_400_000L)) / msPerMonth
-                }
-            }
-            val rideCount    = filtered.size
-            val shiftCount   = uniqueShifts.coerceAtLeast(if (rideCount > 0) 1 else 0)
-            // Deduplicate expenses by name — the same real-world expense (e.g. monthly insurance)
-            // can appear in multiple tariffs with identical settings; count it only once.
-            data class CustomExpRow(val name: String, val cost: Double)
-            val customRows = allExpenses
-                .groupBy { it.name }
-                .map { (_, exps) ->
-                    val exp  = exps.first()   // same expense in all tariffs — one entry is enough
-                    val cost = when (exp.freq) {
-                        ExpenseFrequency.PER_RIDE  -> if (exp.expType == ExpenseType.FIXED)
-                            exp.amount * rideCount
-                            else exp.amount / 100.0 * total
-                        ExpenseFrequency.PER_SHIFT -> if (exp.expType == ExpenseType.FIXED)
-                            exp.amount * shiftCount
-                            else exp.amount / 100.0 * total
-                        ExpenseFrequency.PER_MONTH -> if (exp.expType == ExpenseType.FIXED)
-                            exp.amount * filteredMonths
-                            else exp.amount / 100.0 * total
-                    }
-                    CustomExpRow(exp.name, cost)
-                }
-                .filter { it.cost > 0.0 }
-
-            val totalCustomCost = customRows.sumOf { it.cost }
-            val adjustedNet     = netProfit - totalCustomCost
 
             val rows = mutableListOf(
                 Triple(st.grossRevenue, "+${settings.formatPrice(total)}",      tc.textPrimary),
@@ -984,6 +1123,160 @@ fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
 }
 
 @Composable
+private fun StatsAdvancedFilters(
+    zones: List<Zone>,
+    outsideLabel: String,
+    fromZoneName: String?,
+    toZoneName: String?,
+    kmText: String,
+    fareText: String,
+    durationText: String,
+    kmIsMin: Boolean,
+    fareIsMin: Boolean,
+    durationIsMin: Boolean,
+    onFromSelected: (String?) -> Unit,
+    onToSelected: (String?) -> Unit,
+    onKmChange: (String) -> Unit,
+    onFareChange: (String) -> Unit,
+    onDurationChange: (String) -> Unit,
+    onToggleKmMode: () -> Unit,
+    onToggleFareMode: () -> Unit,
+    onToggleDurationMode: () -> Unit,
+    onApplyKm: () -> Unit,
+    onApplyFare: () -> Unit,
+    onApplyDuration: () -> Unit,
+    onClear: () -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    val settings = LocalSettings.current
+    val options = remember(zones, outsideLabel) {
+        listOf<Pair<String?, String>>(null to "Всички") +
+            zones.map { it.name to it.name } +
+            (outsideLabel.takeIf { it.isNotBlank() }?.let { listOf(it to it) } ?: emptyList())
+    }
+    val hasFilters = fromZoneName != null || toZoneName != null ||
+        kmText.isNotBlank() || fareText.isNotBlank() || durationText.isNotBlank()
+
+    Card(colors = CardDefaults.cardColors(containerColor = tc.card), shape = RoundedCornerShape(14.dp)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Разширени филтри", color = tc.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                if (hasFilters) {
+                    TextButton(onClick = onClear, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                        Icon(Icons.Default.Clear, null, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Изчисти", fontSize = 11.sp)
+                    }
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                StatsZoneDropdown("От зона", fromZoneName, options, Modifier.weight(1f), onFromSelected)
+                StatsZoneDropdown("До зона", toZoneName, options, Modifier.weight(1f), onToSelected)
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                StatsNumberFilter("Км", kmText, settings.distanceUnit.shortLabel, kmIsMin, Modifier.weight(1f), onToggleKmMode, onKmChange, onApplyKm)
+                StatsNumberFilter("Сума", fareText, settings.currency.symbol, fareIsMin, Modifier.weight(1f), onToggleFareMode, onFareChange, onApplyFare)
+                StatsNumberFilter("Време", durationText, "мин", durationIsMin, Modifier.weight(1f), onToggleDurationMode, onDurationChange, onApplyDuration)
+            }
+}
+    }
+}
+
+@Composable
+private fun StatsZoneDropdown(
+    label: String,
+    selected: String?,
+    options: List<Pair<String?, String>>,
+    modifier: Modifier = Modifier,
+    onSelected: (String?) -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    var expanded by remember { mutableStateOf(false) }
+    Box(modifier) {
+        OutlinedButton(
+            onClick = { expanded = true },
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(10.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = tc.accent),
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+        ) {
+            Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
+                Text(label, color = tc.muted, fontSize = 9.sp)
+                Text(selected ?: "Всички", color = tc.textPrimary, fontSize = 12.sp, maxLines = 1)
+            }
+            Icon(Icons.Default.ArrowDropDown, null, tint = tc.accent)
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, modifier = Modifier.background(tc.card)) {
+            options.forEach { (value, text) ->
+                DropdownMenuItem(
+                    text = { Text(text, color = if (value == selected) tc.accent else tc.textPrimary, fontSize = 13.sp) },
+                    onClick = {
+                        onSelected(value)
+                        expanded = false
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatsNumberFilter(
+    label: String,
+    value: String,
+    suffix: String,
+    isMin: Boolean,
+    modifier: Modifier = Modifier,
+    onToggleMode: () -> Unit,
+    onValueChange: (String) -> Unit,
+    onApply: () -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    OutlinedTextField(
+        value = value,
+        onValueChange = { raw -> onValueChange(raw.filter { it.isDigit() || it == '.' || it == ',' }) },
+        modifier = modifier,
+        label = {
+            Text(
+                label,
+                color = tc.muted,
+                fontSize = 10.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
+        leadingIcon = {
+            TextButton(
+                onClick = onToggleMode,
+                contentPadding = PaddingValues(horizontal = 4.dp),
+                modifier = Modifier.width(44.dp),
+            ) {
+                Text(if (isMin) "Мин" else "Макс", color = tc.accent, fontSize = 10.sp)
+            }
+        },
+        suffix = { Text(suffix, color = tc.muted, fontSize = 10.sp) },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(
+            keyboardType = KeyboardType.Decimal,
+            imeAction = ImeAction.Done,
+        ),
+        keyboardActions = KeyboardActions(onDone = { onApply() }),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = tc.accent,
+            unfocusedBorderColor = tc.surface,
+            focusedTextColor = tc.textPrimary,
+            unfocusedTextColor = tc.textPrimary,
+            cursorColor = tc.accent,
+            focusedLabelColor = tc.accent,
+        ),
+    )
+}
+
+@Composable
 fun StatCard2(label: String, value: String, sub: String, color: Color, modifier: Modifier) {
     val tc = LocalThemeColors.current
     Card(modifier = modifier,
@@ -1042,6 +1335,12 @@ private fun startOfDay(ms: Long): Long {
     c.set(Calendar.HOUR_OF_DAY, 0); c.set(Calendar.MINUTE, 0)
     c.set(Calendar.SECOND, 0);      c.set(Calendar.MILLISECOND, 0)
     return c.timeInMillis
+}
+
+private fun startOfWeek(ms: Long): Long {
+    val c = Calendar.getInstance().apply { timeInMillis = ms }
+    c.set(Calendar.DAY_OF_WEEK, c.firstDayOfWeek)
+    return startOfDay(c.timeInMillis)
 }
 
 @Composable
@@ -1154,3 +1453,4 @@ private fun BarChart(
         }
     }
 }
+

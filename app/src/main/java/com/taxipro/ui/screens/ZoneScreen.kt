@@ -7,6 +7,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -21,7 +23,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -337,9 +342,9 @@ private fun ZoneMapPreviewDialog(
                     if (pts.size >= 3) {
                         Polygon(
                             points      = pts,
-                            fillColor   = Color(other.color).copy(alpha = 0.10f),
-                            strokeColor = Color(other.color).copy(alpha = 0.30f),
-                            strokeWidth = 2f,
+                            fillColor   = Color(other.color).copy(alpha = if (other.parentZoneId > 0L) 0.16f else 0.10f),
+                            strokeColor = Color(other.color).copy(alpha = if (other.parentZoneId > 0L) 0.48f else 0.30f),
+                            strokeWidth = if (other.parentZoneId > 0L) 3f else 2f,
                             clickable   = false,
                         )
                     }
@@ -349,9 +354,9 @@ private fun ZoneMapPreviewDialog(
                 if (points.size >= 3) {
                     Polygon(
                         points      = points,
-                        fillColor   = color.copy(alpha = 0.35f),
+                        fillColor   = color.copy(alpha = if (zone.parentZoneId > 0L) 0.42f else 0.35f),
                         strokeColor = color,
-                        strokeWidth = 5f,
+                        strokeWidth = if (zone.parentZoneId > 0L) 6f else 5f,
                         clickable   = false,
                     )
                 }
@@ -387,7 +392,222 @@ private fun ZoneMapPreviewDialog(
 
 // ── Tab 2: Zone statistics ────────────────────────────────────────────────────
 
-private enum class ZoneSortOrder { PICKUPS, DROPOFFS, REVENUE, AVG_KM, AVG_TIP }
+private enum class ZoneSortOrder { PICKUPS, DROPOFFS, TOTAL_REVENUE, AVG_REVENUE, AVG_KM, AVG_TIP, AVG_WAIT }
+
+private data class ZoneRouteNames(
+    val from: String,
+    val to: String,
+)
+
+private fun rideZoneNames(
+    ride: com.taxipro.data.db.Ride,
+    zones: List<Zone>,
+    outsideLabel: String,
+): ZoneRouteNames {
+    val (sLat, sLng) = rideStartLatLng(ride) ?: (0.0 to 0.0)
+    val (eLat, eLng) = rideEndLatLng(ride) ?: (0.0 to 0.0)
+    return ZoneRouteNames(
+        from = primaryZoneLabel(sLat, sLng, zones, outsideLabel) ?: outsideLabel,
+        to = primaryZoneLabel(eLat, eLng, zones, outsideLabel) ?: outsideLabel,
+    )
+}
+
+@Composable
+private fun ZoneDirectionFilters(
+    zones: List<Zone>,
+    outsideLabel: String,
+    fromZoneName: String?,
+    toZoneName: String?,
+    kmText: String,
+    fareText: String,
+    durationText: String,
+    kmIsMin: Boolean,
+    fareIsMin: Boolean,
+    durationIsMin: Boolean,
+    onFromSelected: (String?) -> Unit,
+    onToSelected: (String?) -> Unit,
+    onKmChange: (String) -> Unit,
+    onFareChange: (String) -> Unit,
+    onDurationChange: (String) -> Unit,
+    onToggleKmMode: () -> Unit,
+    onToggleFareMode: () -> Unit,
+    onToggleDurationMode: () -> Unit,
+    onApplyKm: () -> Unit,
+    onApplyFare: () -> Unit,
+    onApplyDuration: () -> Unit,
+    onClear: () -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    val settings = LocalSettings.current
+    val options = remember(zones, outsideLabel) {
+        listOf<Pair<String?, String>>(null to "Всички") +
+            zones.map { it.name to it.name } +
+            (outsideLabel.takeIf { it.isNotBlank() }?.let { listOf(it to it) } ?: emptyList())
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = tc.card),
+        shape = RoundedCornerShape(14.dp),
+    ) {
+        Column(
+            Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Филтър по маршрут",
+                    color = tc.textPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                if (fromZoneName != null || toZoneName != null ||
+                    kmText.isNotBlank() || fareText.isNotBlank() || durationText.isNotBlank()
+                ) {
+                    TextButton(onClick = onClear, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                        Icon(Icons.Default.Clear, null, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Изчисти", fontSize = 11.sp)
+                    }
+                }
+            }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                ZoneFilterDropdown(
+                    label = "От зона",
+                    selected = fromZoneName,
+                    options = options,
+                    modifier = Modifier.weight(1f),
+                    onSelected = onFromSelected,
+                )
+                ZoneFilterDropdown(
+                    label = "До зона",
+                    selected = toZoneName,
+                    options = options,
+                    modifier = Modifier.weight(1f),
+                    onSelected = onToSelected,
+                )
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ZoneNumberFilter("Км", kmText, settings.distanceUnit.shortLabel, kmIsMin, Modifier.weight(1f), onToggleKmMode, onKmChange, onApplyKm)
+                ZoneNumberFilter("Сума", fareText, settings.currency.symbol, fareIsMin, Modifier.weight(1f), onToggleFareMode, onFareChange, onApplyFare)
+                ZoneNumberFilter("Време", durationText, "мин", durationIsMin, Modifier.weight(1f), onToggleDurationMode, onDurationChange, onApplyDuration)
+            }
+val summary = when {
+                fromZoneName != null && toZoneName != null -> "Само курсове: $fromZoneName → $toZoneName"
+                fromZoneName != null -> "Само курсове от: $fromZoneName"
+                toZoneName != null -> "Само курсове до: $toZoneName"
+                else -> "Показва всички начални и крайни зони"
+            }
+            Text(summary, color = tc.muted, fontSize = 11.sp)
+        }
+    }
+}
+
+@Composable
+private fun ZoneNumberFilter(
+    label: String,
+    value: String,
+    suffix: String,
+    isMin: Boolean,
+    modifier: Modifier = Modifier,
+    onToggleMode: () -> Unit,
+    onValueChange: (String) -> Unit,
+    onApply: () -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    OutlinedTextField(
+        value = value,
+        onValueChange = { raw -> onValueChange(raw.filter { it.isDigit() || it == '.' || it == ',' }) },
+        modifier = modifier,
+        label = {
+            Text(
+                label,
+                color = tc.muted,
+                fontSize = 10.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
+        leadingIcon = {
+            TextButton(
+                onClick = onToggleMode,
+                contentPadding = PaddingValues(horizontal = 4.dp),
+                modifier = Modifier.width(44.dp),
+            ) {
+                Text(if (isMin) "Мин" else "Макс", color = tc.accent, fontSize = 10.sp)
+            }
+        },
+        suffix = { Text(suffix, color = tc.muted, fontSize = 10.sp) },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(
+            keyboardType = KeyboardType.Decimal,
+            imeAction = ImeAction.Done,
+        ),
+        keyboardActions = KeyboardActions(onDone = { onApply() }),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = tc.accent,
+            unfocusedBorderColor = tc.surface,
+            focusedTextColor = tc.textPrimary,
+            unfocusedTextColor = tc.textPrimary,
+            cursorColor = tc.accent,
+            focusedLabelColor = tc.accent,
+        ),
+    )
+}
+
+@Composable
+private fun ZoneFilterDropdown(
+    label: String,
+    selected: String?,
+    options: List<Pair<String?, String>>,
+    modifier: Modifier = Modifier,
+    onSelected: (String?) -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    var expanded by remember { mutableStateOf(false) }
+    Box(modifier) {
+        OutlinedButton(
+            onClick = { expanded = true },
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(10.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = tc.accent),
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+        ) {
+            Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
+                Text(label, color = tc.muted, fontSize = 9.sp)
+                Text(selected ?: "Всички", color = tc.textPrimary, fontSize = 12.sp, maxLines = 1)
+            }
+            Icon(Icons.Default.ArrowDropDown, null, tint = tc.accent)
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.background(tc.card),
+        ) {
+            options.forEach { (value, text) ->
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text,
+                            color = if (value == selected) tc.accent else tc.textPrimary,
+                            fontSize = 13.sp,
+                        )
+                    },
+                    onClick = {
+                        onSelected(value)
+                        expanded = false
+                    },
+                )
+            }
+        }
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -397,9 +617,24 @@ private fun ZoneStatsTab(zones: List<Zone>, rides: List<com.taxipro.data.db.Ride
     val settings = LocalSettings.current
 
     var sortOrder    by remember { mutableStateOf(ZoneSortOrder.PICKUPS) }
+    var sortAsc      by remember { mutableStateOf(false) }
     var showSortMenu by remember { mutableStateOf(false) }
     var showRoutes   by remember { mutableStateOf(false) }
     var selectedStat by remember { mutableStateOf<ZoneStat?>(null) }
+    var fromZoneName by remember { mutableStateOf<String?>(null) }
+    var toZoneName   by remember { mutableStateOf<String?>(null) }
+    var kmFilterText       by remember { mutableStateOf("") }
+    var fareFilterText     by remember { mutableStateOf("") }
+    var durationFilterText by remember { mutableStateOf("") }
+    var kmFilterIsMin       by remember { mutableStateOf(true) }
+    var fareFilterIsMin     by remember { mutableStateOf(true) }
+    var durationFilterIsMin by remember { mutableStateOf(true) }
+    var appliedKmFilterText       by remember { mutableStateOf("") }
+    var appliedFareFilterText     by remember { mutableStateOf("") }
+    var appliedDurationFilterText by remember { mutableStateOf("") }
+    var appliedKmFilterIsMin       by remember { mutableStateOf(true) }
+    var appliedFareFilterIsMin     by remember { mutableStateOf(true) }
+    var appliedDurationFilterIsMin by remember { mutableStateOf(true) }
 
     // Period filter state — initialised to today so the first render shows today's data
     val nowMs = remember { System.currentTimeMillis() }
@@ -408,11 +643,38 @@ private fun ZoneStatsTab(zones: List<Zone>, rides: List<com.taxipro.data.db.Ride
     val allZoneWaitSessions by rideVm.allZoneWaitSessions.collectAsState(initial = emptyList())
 
     // ── Date filtering ──────────────────────────────────────────────────
-    val filteredRides = remember(rides, filterFromMs, filterToMs) {
+    val dateFilteredRides = remember(rides, filterFromMs, filterToMs) {
         if (filterFromMs != null && filterToMs != null)
             rides.filter { it.startTime in filterFromMs!!..filterToMs!! }
         else
             rides
+    }
+    val kmFilter       = appliedKmFilterText.replace(",", ".").toDoubleOrNull()
+    val fareFilter     = appliedFareFilterText.replace(",", ".").toDoubleOrNull()
+    val durationFilter = appliedDurationFilterText.replace(",", ".").toDoubleOrNull()
+    val minKm       = kmFilter.takeIf { appliedKmFilterIsMin }
+    val minFare     = fareFilter.takeIf { appliedFareFilterIsMin }
+    val minDuration = durationFilter.takeIf { appliedDurationFilterIsMin }
+    val maxKm       = kmFilter.takeIf { !appliedKmFilterIsMin }
+    val maxFare     = fareFilter.takeIf { !appliedFareFilterIsMin }
+    val maxDuration = durationFilter.takeIf { !appliedDurationFilterIsMin }
+
+    val filteredRides = remember(
+        dateFilteredRides, zones, fromZoneName, toZoneName, minKm, minFare, minDuration,
+        maxKm, maxFare, maxDuration, st.zones.outsideZones,
+    ) {
+        dateFilteredRides.filter { ride ->
+            val route = rideZoneNames(ride, zones, st.zones.outsideZones)
+            val durationMin = ((ride.endTime - ride.startTime).coerceAtLeast(0L)) / 60_000.0
+            (fromZoneName == null || route.from == fromZoneName) &&
+                (toZoneName == null || route.to == toZoneName) &&
+                (minKm == null || ride.kilometers >= minKm) &&
+                (minFare == null || ride.price + ride.tip >= minFare) &&
+                (minDuration == null || durationMin >= minDuration) &&
+                (maxKm == null || ride.kilometers <= maxKm) &&
+                (maxFare == null || ride.price + ride.tip <= maxFare) &&
+                (maxDuration == null || durationMin <= maxDuration)
+        }
     }
     val filteredZoneWaits = remember(allZoneWaitSessions, filterFromMs, filterToMs) {
         if (filterFromMs != null && filterToMs != null)
@@ -440,22 +702,28 @@ private fun ZoneStatsTab(zones: List<Zone>, rides: List<com.taxipro.data.db.Ride
 
     val (zoneStats, routeStats) = computedStats
 
-    val sortedStats = remember(zoneStats, sortOrder) {
-        when (sortOrder) {
-            ZoneSortOrder.PICKUPS  -> zoneStats.sortedByDescending { it.pickupCount }
-            ZoneSortOrder.DROPOFFS -> zoneStats.sortedByDescending { it.dropoffCount }
-            ZoneSortOrder.REVENUE  -> zoneStats.sortedByDescending { it.avgRevenue }
-            ZoneSortOrder.AVG_KM   -> zoneStats.sortedByDescending { it.avgKm }
-            ZoneSortOrder.AVG_TIP  -> zoneStats.sortedByDescending { it.avgTip }
+    val sortedStats = remember(zoneStats, sortOrder, sortAsc) {
+        val comparator = when (sortOrder) {
+            ZoneSortOrder.PICKUPS       -> compareBy<ZoneStat> { it.pickupCount }
+            ZoneSortOrder.DROPOFFS      -> compareBy { it.dropoffCount }
+            ZoneSortOrder.TOTAL_REVENUE -> compareBy { it.totalRevenue }
+            ZoneSortOrder.AVG_REVENUE   -> compareBy { it.avgRevenue }
+            ZoneSortOrder.AVG_KM        -> compareBy { it.avgKm }
+            ZoneSortOrder.AVG_TIP       -> compareBy { it.avgTip }
+            ZoneSortOrder.AVG_WAIT      -> compareBy { it.avgWaitMs }
         }
+        if (sortAsc) zoneStats.sortedWith(comparator)
+        else zoneStats.sortedWith(comparator.reversed())
     }
 
     val sortLabel = when (sortOrder) {
-        ZoneSortOrder.PICKUPS  -> st.zones.sortByPickups
-        ZoneSortOrder.DROPOFFS -> st.zones.sortByDropoffs
-        ZoneSortOrder.REVENUE  -> st.zones.sortByRevenue
-        ZoneSortOrder.AVG_KM   -> st.zones.sortByAvgKm
-        ZoneSortOrder.AVG_TIP  -> st.zones.sortByAvgTip
+        ZoneSortOrder.PICKUPS       -> st.zones.sortByPickups
+        ZoneSortOrder.DROPOFFS      -> st.zones.sortByDropoffs
+        ZoneSortOrder.TOTAL_REVENUE -> "Оборот"
+        ZoneSortOrder.AVG_REVENUE   -> st.zones.sortByRevenue
+        ZoneSortOrder.AVG_KM        -> st.zones.sortByAvgKm
+        ZoneSortOrder.AVG_TIP       -> st.zones.sortByAvgTip
+        ZoneSortOrder.AVG_WAIT      -> "Чакане"
     }
 
     Column(
@@ -468,6 +736,46 @@ private fun ZoneStatsTab(zones: List<Zone>, rides: List<com.taxipro.data.db.Ride
         // ── Date filter chips ───────────────────────────────────────────
         PeriodFilterRow(
             onRangeChanged = { f, t -> filterFromMs = f; filterToMs = t },
+        )
+
+        ZoneDirectionFilters(
+            zones          = zones,
+            outsideLabel   = st.zones.outsideZones,
+            fromZoneName   = fromZoneName,
+            toZoneName     = toZoneName,
+            kmText = kmFilterText,
+            fareText = fareFilterText,
+            durationText = durationFilterText,
+            kmIsMin = kmFilterIsMin,
+            fareIsMin = fareFilterIsMin,
+            durationIsMin = durationFilterIsMin,
+            onFromSelected = { fromZoneName = it },
+            onToSelected   = { toZoneName = it },
+            onKmChange = { kmFilterText = it },
+            onFareChange = { fareFilterText = it },
+            onDurationChange = { durationFilterText = it },
+            onToggleKmMode = { kmFilterIsMin = !kmFilterIsMin; appliedKmFilterIsMin = kmFilterIsMin; if (kmFilterText.isNotBlank()) appliedKmFilterText = kmFilterText },
+            onToggleFareMode = { fareFilterIsMin = !fareFilterIsMin; appliedFareFilterIsMin = fareFilterIsMin; if (fareFilterText.isNotBlank()) appliedFareFilterText = fareFilterText },
+            onToggleDurationMode = { durationFilterIsMin = !durationFilterIsMin; appliedDurationFilterIsMin = durationFilterIsMin; if (durationFilterText.isNotBlank()) appliedDurationFilterText = durationFilterText },
+            onApplyKm = { appliedKmFilterText = kmFilterText; appliedKmFilterIsMin = kmFilterIsMin },
+            onApplyFare = { appliedFareFilterText = fareFilterText; appliedFareFilterIsMin = fareFilterIsMin },
+            onApplyDuration = { appliedDurationFilterText = durationFilterText; appliedDurationFilterIsMin = durationFilterIsMin },
+            onClear        = {
+                fromZoneName = null
+                toZoneName = null
+                kmFilterText = ""
+                fareFilterText = ""
+                durationFilterText = ""
+                kmFilterIsMin = true
+                fareFilterIsMin = true
+                durationFilterIsMin = true
+                appliedKmFilterText = ""
+                appliedFareFilterText = ""
+                appliedDurationFilterText = ""
+                appliedKmFilterIsMin = true
+                appliedFareFilterIsMin = true
+                appliedDurationFilterIsMin = true
+            },
         )
 
         // ── Large range warning ─────────────────────────────────────────
@@ -507,34 +815,47 @@ private fun ZoneStatsTab(zones: List<Zone>, rides: List<com.taxipro.data.db.Ride
             }
         } else if (!isLoadingStats) {
             Box {
-                OutlinedButton(
-                    onClick = { showSortMenu = true },
-                    shape   = RoundedCornerShape(10.dp),
-                    colors  = ButtonDefaults.outlinedButtonColors(contentColor = tc.accent),
-                ) {
-                    Icon(Icons.Default.Sort, null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(sortLabel, fontSize = 12.sp)
-                }
-                DropdownMenu(
-                    expanded         = showSortMenu,
-                    onDismissRequest = { showSortMenu = false },
-                    modifier         = Modifier.background(tc.card),
-                ) {
-                    listOf(
-                        ZoneSortOrder.PICKUPS  to st.zones.sortByPickups,
-                        ZoneSortOrder.DROPOFFS to st.zones.sortByDropoffs,
-                        ZoneSortOrder.REVENUE  to st.zones.sortByRevenue,
-                        ZoneSortOrder.AVG_KM   to st.zones.sortByAvgKm,
-                        ZoneSortOrder.AVG_TIP  to st.zones.sortByAvgTip,
-                    ).forEach { (order, label) ->
-                        DropdownMenuItem(
-                            text    = {
-                                Text(label,
-                                    color = if (sortOrder == order) tc.accent else tc.textPrimary)
-                            },
-                            onClick = { sortOrder = order; showSortMenu = false },
-                        )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box {
+                        OutlinedButton(
+                            onClick = { showSortMenu = true },
+                            shape   = RoundedCornerShape(10.dp),
+                            colors  = ButtonDefaults.outlinedButtonColors(contentColor = tc.accent),
+                        ) {
+                            Icon(Icons.Default.Sort, null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(sortLabel, fontSize = 12.sp)
+                        }
+                        DropdownMenu(
+                            expanded         = showSortMenu,
+                            onDismissRequest = { showSortMenu = false },
+                            modifier         = Modifier.background(tc.card),
+                        ) {
+                            listOf(
+                                ZoneSortOrder.PICKUPS       to st.zones.sortByPickups,
+                                ZoneSortOrder.DROPOFFS      to st.zones.sortByDropoffs,
+                                ZoneSortOrder.TOTAL_REVENUE to "Оборот",
+                                ZoneSortOrder.AVG_REVENUE   to st.zones.sortByRevenue,
+                                ZoneSortOrder.AVG_KM        to st.zones.sortByAvgKm,
+                                ZoneSortOrder.AVG_TIP       to st.zones.sortByAvgTip,
+                                ZoneSortOrder.AVG_WAIT      to "Чакане",
+                            ).forEach { (order, label) ->
+                                DropdownMenuItem(
+                                    text    = {
+                                        Text(label,
+                                            color = if (sortOrder == order) tc.accent else tc.textPrimary)
+                                    },
+                                    onClick = { sortOrder = order; showSortMenu = false },
+                                )
+                            }
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = { sortAsc = !sortAsc },
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = tc.accent),
+                    ) {
+                        Text(if (sortAsc) "↑" else "↓", fontSize = 16.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -1170,3 +1491,5 @@ private fun RouteStatRow(
     }
     HorizontalDivider(color = tc.surface, thickness = 0.5.dp)
 }
+
+

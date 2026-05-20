@@ -398,6 +398,8 @@ fun TariffEditDialog(
                 } else {
                     expenses.forEachIndexed { idx, exp ->
                         val freqLabel = when (exp.freq) {
+                            ExpenseFrequency.PER_DAY   -> "На ден"
+                            ExpenseFrequency.PER_WEEK  -> "На седмица"
                             ExpenseFrequency.PER_RIDE  -> st.freqPerRide
                             ExpenseFrequency.PER_SHIFT -> st.freqPerShift
                             ExpenseFrequency.PER_MONTH -> st.freqPerMonth
@@ -531,6 +533,8 @@ fun ExpenseEditDialog(
     var freq      by remember { mutableStateOf(ExpenseFrequency.PER_MONTH) }
     var type      by remember { mutableStateOf(ExpenseType.FIXED) }
     var amount    by remember { mutableStateOf(0.0) }
+    var monthlyMode by remember { mutableStateOf(MonthlyExpenseMode.AUTO) }
+    var manualWorkDays by remember { mutableIntStateOf(20) }
     var nameError by remember { mutableStateOf(false) }
 
     AlertDialog(
@@ -568,6 +572,8 @@ fun ExpenseEditDialog(
                         .background(tc.cardAlt, RoundedCornerShape(8.dp))
                 ) {
                     listOf(
+                        ExpenseFrequency.PER_DAY to "Per day",
+                        ExpenseFrequency.PER_WEEK to "Per week",
                         ExpenseFrequency.PER_RIDE  to st.freqPerRide,
                         ExpenseFrequency.PER_SHIFT to st.freqPerShift,
                         ExpenseFrequency.PER_MONTH to st.freqPerMonth,
@@ -584,7 +590,53 @@ fun ExpenseEditDialog(
                             if (freq == f)
                                 Icon(Icons.Default.Check, null, tint = tc.accent, modifier = Modifier.size(16.dp))
                         }
-                        if (idx < 2) HorizontalDivider(color = tc.surface, thickness = 0.5.dp)
+                        if (idx < 4) HorizontalDivider(color = tc.surface, thickness = 0.5.dp)
+                    }
+                }
+
+                if (freq == ExpenseFrequency.PER_MONTH) {
+                    Text(
+                        "Monthly distribution",
+                        color = tc.muted,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.5.sp,
+                    )
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(tc.cardAlt, RoundedCornerShape(8.dp))
+                    ) {
+                        listOf(
+                            MonthlyExpenseMode.AUTO to "Automatic (calendar days)",
+                            MonthlyExpenseMode.MANUAL to "Manual (work days)",
+                        ).forEachIndexed { idx, (mode, label) ->
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable { monthlyMode = mode }
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(label, color = if (monthlyMode == mode) tc.accent else tc.textPrimary, fontSize = 13.sp)
+                                if (monthlyMode == mode) {
+                                    Icon(Icons.Default.Check, null, tint = tc.accent, modifier = Modifier.size(16.dp))
+                                }
+                            }
+                            if (idx == 0) HorizontalDivider(color = tc.surface, thickness = 0.5.dp)
+                        }
+                    }
+                    if (monthlyMode == MonthlyExpenseMode.AUTO) {
+                        Text(
+                            "Automatic mode divides the monthly amount by the calendar days in the current month. Example: 190/month is about 6.1 per day in a 31-day month.",
+                            color = tc.muted,
+                            fontSize = 11.sp,
+                        )
+                    } else {
+                        TariffNumRow("Work days / month", manualWorkDays.toDouble(), "days") {
+                            manualWorkDays = it.toInt().coerceAtLeast(1)
+                        }
                     }
                 }
 
@@ -615,6 +667,8 @@ fun ExpenseEditDialog(
                         frequency = freq.code,
                         type      = type.code,
                         amount    = amount,
+                        monthlyMode = monthlyMode.code,
+                        manualWorkDays = manualWorkDays,
                     ))
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = tc.accent)

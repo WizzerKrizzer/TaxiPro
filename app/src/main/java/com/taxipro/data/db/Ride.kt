@@ -41,6 +41,7 @@ data class Ride(
 
     // Смяна
     val shiftId: Long = 0,
+    @ColumnInfo(defaultValue = "0") val tariffId: Int = 0,
 
     // Снимка на тарифните разходи при запазване на курса
     val taxPercent: Double    = 0.0,

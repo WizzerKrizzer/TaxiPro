@@ -40,6 +40,23 @@ interface RideDao {
     @Query("SELECT * FROM rides WHERE shiftId = :shiftId ORDER BY startTime ASC")
     fun getRidesByShiftId(shiftId: Long): Flow<List<Ride>>
 
+    @Query("""
+        SELECT * FROM rides
+        WHERE shiftId = :shiftId
+           OR (
+                shiftId = :shiftNumber
+                AND startTime >= :shiftStart
+                AND (:shiftEnd <= 0 OR startTime <= :shiftEnd)
+           )
+        ORDER BY startTime ASC
+    """)
+    fun getRidesForShift(
+        shiftId: Long,
+        shiftNumber: Long,
+        shiftStart: Long,
+        shiftEnd: Long,
+    ): Flow<List<Ride>>
+
     @Query("DELETE FROM rides WHERE shiftId = :shiftId")
     suspend fun deleteByShiftId(shiftId: Long)
 

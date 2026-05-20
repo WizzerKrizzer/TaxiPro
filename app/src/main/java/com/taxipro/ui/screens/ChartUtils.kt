@@ -69,65 +69,71 @@ fun calculateYAxisScaleForActualEarnings(actualEarnings: Double): YAxisScale {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// X-Axis Scale — 6 time labels: shift start + 5 round-hour marks
-// Interval adapts to average shift length: 1h / 2h / 3h
-// Handles shifts > 12h: uses 3h intervals → covers up to 15h
+// X-Axis Scale — dynamic time labels that expand like the Y-axis.
+// Short shifts start dense (30 min), then thin out to 1h / 2h / 3h+ intervals.
 // ────────────────────────────────────────────────────────────────────────────
 
 data class XAxisScale(
-    /** List of (timestampMs, "HH:mm") pairs — always 6 entries. */
+    /** List of (timestampMs, "HH:mm") pairs. */
     val labels       : List<Pair<Long, String>>,
-    /** Hours between consecutive round-hour labels. */
-    val intervalHours: Int,
+    /** Minutes between consecutive labels. */
+    val intervalMinutes: Int,
 )
 
 /**
  * Build an X-axis scale for a shift starting at [shiftStartMs].
  *
- * [expectedDurationHours]: average (or actual) shift length in hours.
- *  - ≤ 6h  → 1h intervals  → covers ~5h after start
- *  - ≤ 12h → 2h intervals  → covers ~10h after start
- *  - > 12h → 3h intervals  → covers ~15h after start
+ * [durationHours]: real or expected shift length in hours.
+ * [shiftEndMs]: when supplied, the returned labels are guaranteed to extend beyond it.
  *
- * Label layout: "15:12", "16:00", "17:00", "18:00", "19:00", "20:00"
+ * Label layout examples:
+ *  - short: "15:00", "15:30", "16:00", "16:30"
+ *  - longer: "15:30", "16:30", "17:30", "18:30"
  */
-fun calculateXAxisScale(shiftStartMs: Long, expectedDurationHours: Double): XAxisScale {
-    val intervalHours = when {
-        expectedDurationHours <= 6  -> 1
-        expectedDurationHours <= 12 -> 2
-        expectedDurationHours <= 18 -> 3
-        else                        -> Math.ceil(expectedDurationHours / 5.0).toInt().coerceAtLeast(4)
-    }
-
+fun calculateXAxisScale(
+    shiftStartMs: Long,
+    durationHours: Double,
+    shiftEndMs: Long = shiftStartMs,
+): XAxisScale {
     val fmt    = SimpleDateFormat("HH:mm", Locale.getDefault())
     val labels = mutableListOf<Pair<Long, String>>()
 
-    // First label: exact shift start time
-    labels.add(shiftStartMs to fmt.format(Date(shiftStartMs)))
+    val actualEndMs = maxOf(shiftEndMs, shiftStartMs)
+    val actualDurationMs = (actualEndMs - shiftStartMs).coerceAtLeast(0L)
+    val requestedDurationMs = (durationHours.coerceAtLeast(0.0) * 3_600_000.0).toLong()
+    val baseDurationMs = maxOf(actualDurationMs, requestedDurationMs, 60L * 60_000L)
 
-    // Find the next full hour after shift start
-    val cal = Calendar.getInstance().apply {
-        timeInMillis = shiftStartMs
-        set(Calendar.SECOND,      0)
-        set(Calendar.MILLISECOND, 0)
-        set(Calendar.MINUTE,      0)
-        add(Calendar.HOUR_OF_DAY, 1)   // advance to next full hour
+    // Keep roughly four-to-five visible time marks, just like the earnings scale.
+    val intervalMinutes = when {
+        baseDurationMs <= 90L * 60_000L -> 30
+        baseDurationMs <= 3L * 3_600_000L -> 60
+        baseDurationMs <= 6L * 3_600_000L -> 120
+        baseDurationMs <= 9L * 3_600_000L -> 180
+        baseDurationMs <= 12L * 3_600_000L -> 240
+        else -> (Math.ceil(baseDurationMs / 60_000.0 / 4.0 / 60.0) * 60).toInt()
     }
-    // Round up to next multiple of intervalHours
-    val rawHour     = cal.get(Calendar.HOUR_OF_DAY)
-    val roundedHour = ((rawHour + intervalHours - 1) / intervalHours) * intervalHours
-    cal.add(Calendar.HOUR_OF_DAY, roundedHour - rawHour)
 
-    val targetEndMs = shiftStartMs +
-        ((expectedDurationHours + intervalHours) * 3_600_000.0).toLong()
+    val intervalMs = intervalMinutes * 60_000L
+    val targetEndMs = actualEndMs + intervalMs
 
-    // Add round-hour labels until there is one interval of headroom, capped at 6 labels.
+    // Align labels to the selected interval, so they naturally slide from :00/:30 to hourly marks.
+    val firstTickMs = Math.floorDiv(shiftStartMs, intervalMs) * intervalMs
+    val cal = Calendar.getInstance().apply {
+        timeInMillis = firstTickMs
+        set(Calendar.SECOND, 0)
+        set(Calendar.MILLISECOND, 0)
+    }
+
     while (labels.size < 6 && cal.timeInMillis <= targetEndMs) {
         labels.add(cal.timeInMillis to fmt.format(cal.time))
-        cal.add(Calendar.HOUR_OF_DAY, intervalHours)
+        cal.add(Calendar.MINUTE, intervalMinutes)
     }
 
-    return XAxisScale(labels, intervalHours)
+    if (labels.none { it.first >= actualEndMs }) {
+        labels.add(cal.timeInMillis to fmt.format(cal.time))
+    }
+
+    return XAxisScale(labels, intervalMinutes)
 }
 
 // ────────────────────────────────────────────────────────────────────────────

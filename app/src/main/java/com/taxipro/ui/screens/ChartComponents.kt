@@ -12,6 +12,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
@@ -28,6 +29,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
 import com.taxipro.data.db.Ride
 import com.taxipro.data.db.Shift
+import com.taxipro.data.db.ShiftPauseSession
 import com.taxipro.data.db.ZoneWaitSession
 import com.taxipro.data.db.formatPrice
 import com.taxipro.ui.theme.LocalSettings
@@ -58,6 +60,7 @@ private fun formatDurationShort(totalMs: Long): String {
 fun ShiftEarningsChart(
     rides                 : List<Ride>,
     waitSessions          : List<ZoneWaitSession> = emptyList(),
+    pauseSessions         : List<ShiftPauseSession> = emptyList(),
     shiftStartMs          : Long,
     shiftEndMs            : Long,
     accentColor           : Color,
@@ -65,6 +68,7 @@ fun ShiftEarningsChart(
     currentPrice          : Double      = 0.0,    // live price of the active ride
     currentRideStartMs    : Long        = 0L,
     isRideActive          : Boolean     = false,
+    isShiftActive         : Boolean     = isRideActive,
     expectedDurationHours : Double      = 8.0,    // for X-axis interval selection
     useActualShiftScale   : Boolean     = false,
 ) {
@@ -104,10 +108,18 @@ fun ShiftEarningsChart(
 
     // ── X-axis scale: time labels — locked once per shift start + duration ─
     val elapsedHours = ((shiftEndMs - shiftStartMs).coerceAtLeast(0L)) / 3_600_000.0
-    val scaleDurationHours = if (useActualShiftScale) elapsedHours else maxOf(expectedDurationHours, elapsedHours)
-    val durationBucket = Math.ceil(maxOf(scaleDurationHours, 1.0)).toInt()
+    val scaleDurationHours = if (useActualShiftScale || isShiftActive) {
+        elapsedHours
+    } else {
+        maxOf(expectedDurationHours, elapsedHours)
+    }
+    val durationBucket = Math.ceil(maxOf(scaleDurationHours, 0.01) * 2.0).toInt().coerceAtLeast(1)
     val xScale: XAxisScale = remember(shiftStartMs, durationBucket) {
-        calculateXAxisScale(shiftStartMs, durationBucket.toDouble())
+        calculateXAxisScale(
+            shiftStartMs = shiftStartMs,
+            durationHours = scaleDurationHours,
+            shiftEndMs = shiftEndMs,
+        )
     }
 
     // ── Recompose every 150 ms while a ride is active ─────────────────────
@@ -218,6 +230,12 @@ fun ShiftEarningsChart(
             val activeWaitSession = remember(waitSessions, probeTimeMs) {
                 waitSessions.firstOrNull { probeTimeMs in it.startTime..it.endTime }
             }
+            val activePauseSession = remember(pauseSessions, probeTimeMs) {
+                pauseSessions.firstOrNull {
+                    val pauseEnd = if (it.endTime > 0L) it.endTime else shiftEndMs
+                    probeTimeMs in it.startTime..pauseEnd
+                }
+            }
 
             Box(modifier = Modifier.fillMaxWidth()) {
                 Canvas(
@@ -279,6 +297,34 @@ fun ShiftEarningsChart(
                             x = padL - measured.size.width - with(density) { 4.dp.toPx() },
                             y = gy - measured.size.height / 2f,
                         ),
+                    )
+                }
+
+                val pauseFillColor = Color.Black.copy(alpha = 0.30f)
+                val pauseEdgeColor = Color.Black.copy(alpha = 0.82f)
+                pauseSessions.forEach { pause ->
+                    val pauseEnd = (if (pause.endTime > 0L) pause.endTime else shiftEndMs)
+                        .coerceAtMost(shiftEndMs)
+                    if (pauseEnd <= pause.startTime) return@forEach
+                    val left = toX(pause.startTime.coerceAtLeast(shiftStartMs))
+                    val right = toX(pauseEnd.coerceAtLeast(shiftStartMs))
+                    val bandWidth = (right - left).coerceAtLeast(1f)
+                    drawRect(
+                        color = pauseFillColor,
+                        topLeft = Offset(left, padT),
+                        size = Size(bandWidth, chartH),
+                    )
+                    drawLine(
+                        color = pauseEdgeColor,
+                        start = Offset(left, padT),
+                        end = Offset(left, padT + chartH),
+                        strokeWidth = 1.6f,
+                    )
+                    drawLine(
+                        color = pauseEdgeColor,
+                        start = Offset(right, padT),
+                        end = Offset(right, padT + chartH),
+                        strokeWidth = 1.6f,
                     )
                 }
 
@@ -430,13 +476,13 @@ fun ShiftEarningsChart(
                 if (probeActive) {
                     val probeY = toY(probeEarnings)
                     drawLine(
-                        color       = accentColor.copy(alpha = 0.24f),
+                        color       = accentColor.copy(alpha = 0.30f),
                         start       = Offset(probeChartX, padT),
                         end         = Offset(probeChartX, baselineY),
                         strokeWidth = 1.4f,
                     )
                     drawLine(
-                        color       = accentColor.copy(alpha = 0.18f),
+                        color       = accentColor.copy(alpha = 0.24f),
                         start       = Offset(padL, probeY),
                         end         = Offset(padL + chartW, probeY),
                         strokeWidth = 1.2f,
@@ -472,6 +518,23 @@ fun ShiftEarningsChart(
                                 fontSize = 10.sp,
                                 fontFamily = FontFamily.Monospace,
                             )
+                            activePauseSession?.let { pause ->
+                                Text(
+                                    st.pausedLabel,
+                                    color = tc.textPrimary,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                Text(
+                                    formatDurationShort(
+                                        ((if (pause.endTime > 0L) pause.endTime else shiftEndMs) - pause.startTime)
+                                            .coerceAtLeast(0L)
+                                    ),
+                                    color = tc.muted,
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                )
+                            }
                             activeWaitSession?.let { wait ->
                                 Text(
                                     wait.zoneName,

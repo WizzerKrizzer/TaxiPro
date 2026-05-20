@@ -9,6 +9,7 @@ data class Zone(
     val name: String = "",
     val pointsJson: String = "[]",   // "[[lat,lng],[lat,lng],...]" polygon vertices
     val color: Int = 0xFF1E88E5.toInt(),
+    @ColumnInfo(defaultValue = "0") val parentZoneId: Long = 0,
 )
 
 @Dao

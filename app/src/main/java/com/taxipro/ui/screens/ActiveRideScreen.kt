@@ -92,6 +92,19 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
             activeShift   = activeShift,
             isShiftPaused = state.isShiftPaused,
             shiftPausedMs = state.shiftPausedMs,
+            shiftTotalKm  = state.shiftTotalKm,
+            shiftClientKm = activeShift?.let { shift ->
+                val completedKm = allRides
+                    .filter { it.shiftId == shift.id && it.endTime > 0 }
+                    .sumOf { it.kilometers }
+                completedKm + if (state.isTracking) state.totalKm else 0.0
+            } ?: 0.0,
+            shiftTotalEarned = activeShift?.let { shift ->
+                val completedEarned = allRides
+                    .filter { it.shiftId == shift.id && it.endTime > 0 }
+                    .sumOf { it.price + it.tip }
+                completedEarned + if (state.isTracking) finalPrice else 0.0
+            } ?: 0.0,
             onStart  = { vm.startShift() },
             onEnd    = { showEndShiftDialog = true },
             onPause  = { vm.pauseShift() },
@@ -103,12 +116,30 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
             val shiftRides = remember(allRides, shift.id) {
                 allRides.filter { it.shiftId == shift.id && it.endTime > 0 }
             }
+            val savedPauseSessions by rideVm.getShiftPausesByShift(shift.id).collectAsState(initial = emptyList())
+            val chartPauseSessions = remember(
+                savedPauseSessions,
+                state.isShiftPaused,
+                state.currentShiftPauseStartedAt,
+            ) {
+                if (state.isShiftPaused && state.currentShiftPauseStartedAt > 0L) {
+                    savedPauseSessions + com.taxipro.data.db.ShiftPauseSession(
+                        shiftId = shift.id,
+                        startTime = state.currentShiftPauseStartedAt,
+                        endTime = System.currentTimeMillis(),
+                        durationMs = (System.currentTimeMillis() - state.currentShiftPauseStartedAt).coerceAtLeast(0L),
+                    )
+                } else {
+                    savedPauseSessions
+                }
+            }
             val chartScale   by rideVm.chartScale.collectAsState()
             val avgShiftHours by rideVm.avgShiftHours.collectAsState()
             if (shiftRides.isNotEmpty() || state.isTracking) {
                 ShiftEarningsChart(
                     rides                 = shiftRides,
                     waitSessions          = emptyList(),
+                    pauseSessions         = chartPauseSessions,
                     shiftStartMs          = shift.startTime,
                     shiftEndMs            = System.currentTimeMillis(),
                     accentColor           = tc.accent,
@@ -116,6 +147,7 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
                     currentPrice          = if (state.isTracking) finalPrice else 0.0,
                     currentRideStartMs    = state.startTime,
                     isRideActive          = state.isTracking,
+                    isShiftActive         = true,
                     expectedDurationHours = avgShiftHours,
                 )
             }
@@ -856,6 +888,9 @@ fun ShiftBanner(
     activeShift   : Shift?,
     isShiftPaused : Boolean = false,
     shiftPausedMs : Long    = 0L,
+    shiftTotalKm  : Double  = 0.0,
+    shiftClientKm : Double  = 0.0,
+    shiftTotalEarned : Double = 0.0,
     onStart  : () -> Unit,
     onEnd    : () -> Unit,
     onPause  : () -> Unit = {},
@@ -863,6 +898,7 @@ fun ShiftBanner(
 ) {
     val tc = LocalThemeColors.current
     val st = LocalStrings.current
+    val settings = LocalSettings.current
     if (activeShift == null) {
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -915,6 +951,9 @@ fun ShiftBanner(
         val h   = elapsed / 3600
         val m   = (elapsed % 3600) / 60
         val dur = if (h > 0) "${h}${st.hoursAbbr} ${m}${st.minAbbr}" else "${m}${st.minAbbr}"
+        val statusText = if (isShiftPaused) "${st.pausedLabel}  •  $dur" else dur
+        val kmText = "%.1f km total  •  %.1f ${st.withClients}  •  %.1f без клиент"
+            
 
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -937,6 +976,14 @@ fun ShiftBanner(
                         Text(
                             if (isShiftPaused) "${st.pausedLabel}  •  $dur" else dur,
                             color = tc.muted, fontSize = 11.sp
+                        )
+                        Text("%.1f km".format(shiftTotalKm), color = tc.muted, fontSize = 10.sp)
+                        Text(
+                            settings.formatPrice(shiftTotalEarned),
+                            color = tc.textPrimary,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
                         )
                     }
                 }

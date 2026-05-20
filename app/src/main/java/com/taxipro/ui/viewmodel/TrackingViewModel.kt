@@ -8,6 +8,7 @@ import com.taxipro.data.db.*
 import com.taxipro.data.db.Tariff
 import com.taxipro.service.GpsTrackingService
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -18,6 +19,7 @@ data class TrackingState(
     val isPaused: Boolean           = false,
     val isShiftPaused: Boolean      = false,
     val shiftPausedMs: Long         = 0L,
+    val currentShiftPauseStartedAt: Long = 0L,
     val currentLat: Double          = 0.0,
     val currentLng: Double          = 0.0,
     val speedKmh: Double            = 0.0,
@@ -37,6 +39,7 @@ data class TrackingState(
     val activePricePerKm: Double    = 0.0,
     val activePricePerMin: Double   = 0.0,
     val activeStartFee: Double      = 0.0,
+    val activeTariffId: Int         = 0,
 )
 
 
@@ -44,6 +47,7 @@ data class TrackingState(
 class TrackingViewModel(app: Application) : AndroidViewModel(app) {
 
     private val db           = AppDatabase.getInstance(app)
+    private val shiftPauseDao = db.shiftPauseDao()
     private val settingsRepo = SettingsRepository(app)
     private val _state       = MutableStateFlow(TrackingState())
     val state: StateFlow<TrackingState> = _state.asStateFlow()
@@ -123,7 +127,14 @@ class TrackingViewModel(app: Application) : AndroidViewModel(app) {
         val count = dao.getTotalCount()
         val shiftId = dao.insertShift(Shift(shiftNumber = count + 1))
         // Reset shift km counter and pause state, start shift-level GPS tracking
-        _state.update { it.copy(shiftTotalKm = 0.0, isShiftPaused = false, shiftPausedMs = 0L) }
+        _state.update {
+            it.copy(
+                shiftTotalKm = 0.0,
+                isShiftPaused = false,
+                shiftPausedMs = 0L,
+                currentShiftPauseStartedAt = 0L,
+            )
+        }
         shiftPauseStartMs = 0L
         sendAction(GpsTrackingService.ACTION_SHIFT_START, shiftId)
     }
@@ -131,13 +142,27 @@ class TrackingViewModel(app: Application) : AndroidViewModel(app) {
     fun endShift() = viewModelScope.launch {
         val dao    = db.shiftDao()
         val active = activeShift.value ?: return@launch
+        if (_state.value.isShiftPaused && shiftPauseStartMs > 0L) {
+            val pauseEnd = System.currentTimeMillis()
+            val dur = pauseEnd - shiftPauseStartMs
+            persistShiftPauseSession(active.id, shiftPauseStartMs, pauseEnd)
+            _state.update {
+                it.copy(
+                    isShiftPaused = false,
+                    shiftPausedMs = it.shiftPausedMs + dur,
+                    currentShiftPauseStartedAt = 0L,
+                )
+            }
+            shiftPauseStartMs = 0L
+        }
+        sendAction(GpsTrackingService.ACTION_SHIFT_STOP, active.id)
+        delay(250)
         val ended  = active.copy(
             endTime  = System.currentTimeMillis(),
             isActive = false,
             totalKm  = _state.value.shiftTotalKm,
         )
         dao.updateShift(ended)
-        sendAction(GpsTrackingService.ACTION_SHIFT_STOP, active.id)
         _lastEndedShift.value = ended
     }
 
@@ -149,15 +174,44 @@ class TrackingViewModel(app: Application) : AndroidViewModel(app) {
 
     fun pauseShift() {
         shiftPauseStartMs = System.currentTimeMillis()
-        _state.update { it.copy(isShiftPaused = true) }
+        _state.update {
+            it.copy(
+                isShiftPaused = true,
+                currentShiftPauseStartedAt = shiftPauseStartMs,
+            )
+        }
         sendAction(GpsTrackingService.ACTION_SHIFT_PAUSE)
     }
 
     fun resumeShift() {
+        val activeShiftId = activeShift.value?.id ?: 0L
         val dur = if (shiftPauseStartMs > 0L) System.currentTimeMillis() - shiftPauseStartMs else 0L
+        if (activeShiftId > 0L && shiftPauseStartMs > 0L && dur > 0L) {
+            viewModelScope.launch {
+                persistShiftPauseSession(activeShiftId, shiftPauseStartMs, shiftPauseStartMs + dur)
+            }
+        }
         shiftPauseStartMs = 0L
-        _state.update { it.copy(isShiftPaused = false, shiftPausedMs = it.shiftPausedMs + dur) }
+        _state.update {
+            it.copy(
+                isShiftPaused = false,
+                shiftPausedMs = it.shiftPausedMs + dur,
+                currentShiftPauseStartedAt = 0L,
+            )
+        }
         sendAction(GpsTrackingService.ACTION_SHIFT_RESUME)
+    }
+
+    private suspend fun persistShiftPauseSession(shiftId: Long, startMs: Long, endMs: Long) {
+        if (shiftId <= 0L || endMs <= startMs) return
+        shiftPauseDao.insertSession(
+            ShiftPauseSession(
+                shiftId = shiftId,
+                startTime = startMs,
+                endTime = endMs,
+                durationMs = endMs - startMs,
+            )
+        )
     }
 
     // BroadcastReceiver — receives data from GpsTrackingService
@@ -220,6 +274,7 @@ class TrackingViewModel(app: Application) : AndroidViewModel(app) {
             activePricePerKm    = rPerKm,
             activePricePerMin   = rPerMin,
             activeStartFee      = rStartFee,
+            activeTariffId      = tariff?.id ?: 0,
         )}
     }
 
@@ -313,6 +368,7 @@ class TrackingViewModel(app: Application) : AndroidViewModel(app) {
                 routePointsJson = routeJson,
                 avgSpeed        = if (finalKm > 0) finalKm / ((now - s.startTime) / 3_600_000.0) else 0.0,
                 shiftId         = activeShift.value?.id ?: 0L,
+                tariffId        = s.activeTariffId,
                 taxPercent      = s.activeTaxPercent,
                 fuelCostPerKm   = s.activeFuelCostPerKm,
                 adjustmentKm    = extraKm,
@@ -328,6 +384,7 @@ class TrackingViewModel(app: Application) : AndroidViewModel(app) {
             fareAdjustment = 0.0, isWaiting = false, routePoints = emptyList(),
             startTime = 0L, activeTaxPercent = 0.0, activeFuelCostPerKm = 0.0,
             activePricePerKm = 0.0, activePricePerMin = 0.0, activeStartFee = 0.0,
+            activeTariffId = 0,
             elapsedSeconds = 0L,
             // shiftTotalKm intentionally preserved — still accumulating
         )}
@@ -414,10 +471,6 @@ class TrackingViewModel(app: Application) : AndroidViewModel(app) {
                     buildString {
                         if (!a.thoroughfare.isNullOrEmpty())    append(a.thoroughfare)
                         if (!a.subThoroughfare.isNullOrEmpty()) append(" ${a.subThoroughfare}")
-                        if (!a.locality.isNullOrEmpty()) {
-                            if (isNotEmpty()) append(", ")
-                            append(a.locality)
-                        }
                     }.ifEmpty { a.getAddressLine(0) ?: "" }
                 } else ""
             } catch (_: Exception) { "" }

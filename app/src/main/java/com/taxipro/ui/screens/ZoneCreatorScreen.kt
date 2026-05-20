@@ -61,6 +61,11 @@ fun ZoneCreatorScreen(
     }
 
     var zoneName by remember { mutableStateOf(existingZone?.name ?: "") }
+    var isSubZone by remember { mutableStateOf((existingZone?.parentZoneId ?: 0L) > 0L) }
+    var parentZoneId by remember { mutableStateOf(existingZone?.parentZoneId ?: 0L) }
+    var showMainZoneHelp by remember { mutableStateOf(false) }
+    var showSubZoneHelp by remember { mutableStateOf(false) }
+    var showParentMenu by remember { mutableStateOf(false) }
 
     // ── MarkerState list — each entry is one draggable corner ───────
     val markerStates = remember {
@@ -115,12 +120,20 @@ fun ZoneCreatorScreen(
         zoneName.isNotBlank() &&
         otherZones.any { it.name.trim().equals(zoneName.trim(), ignoreCase = true) }
 
-    val canSave = markerStates.size >= 3 && zoneName.isNotBlank() && !isDuplicateName
-
     // Overlap check: inline so drag position changes are reflected immediately
     val pts = markerStates.map { it.position }
+    val selectedParentZone = otherZones.firstOrNull { it.id == parentZoneId }
+    val parentPts = selectedParentZone?.let { parseZonePoints(it.pointsJson) }.orEmpty()
+    val subZoneOutsideParent = isSubZone && parentPts.size >= 3 && pts.any { pt ->
+        !pointInPolygon(pt.latitude, pt.longitude, parentPts)
+    }
+
+    val canSave = markerStates.size >= 3 && zoneName.isNotBlank() && !isDuplicateName &&
+        (!isSubZone || parentZoneId > 0L)
+
     val overlappingNames = if (pts.size < 3) emptyList()
     else otherZones.filter { other ->
+        if (isSubZone && other.id == parentZoneId) return@filter false
         val otherPts = parseZonePoints(other.pointsJson)
         if (otherPts.size < 3) return@filter false
         pts.any { pt -> pointInPolygon(pt.latitude, pt.longitude, otherPts) } ||
@@ -160,6 +173,7 @@ fun ZoneCreatorScreen(
             onMapClick = { latLng ->
                 if (settings.blockZoneOverlapPoints) {
                     val blocking = otherZones.firstOrNull { zone ->
+                        if (isSubZone && zone.id == parentZoneId) return@firstOrNull false
                         pointInPolygon(latLng.latitude, latLng.longitude,
                             parseZonePoints(zone.pointsJson))
                     }
@@ -176,9 +190,9 @@ fun ZoneCreatorScreen(
                 if (rPts.size >= 3) {
                     Polygon(
                         points      = rPts,
-                        fillColor   = Color(zone.color).copy(alpha = 0.15f),
-                        strokeColor = Color(zone.color).copy(alpha = 0.55f),
-                        strokeWidth = 3f,
+                        fillColor   = Color(zone.color).copy(alpha = if (zone.parentZoneId > 0L) 0.23f else 0.15f),
+                        strokeColor = Color(zone.color).copy(alpha = if (zone.parentZoneId > 0L) 0.78f else 0.55f),
+                        strokeWidth = if (zone.parentZoneId > 0L) 4f else 3f,
                         clickable   = false,
                     )
                 }
@@ -320,6 +334,63 @@ fun ZoneCreatorScreen(
 
             Spacer(Modifier.height(4.dp))
 
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                ZoneTypeChip(
+                    label = "Основна зона",
+                    selected = !isSubZone,
+                    onHelp = { showMainZoneHelp = true },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    isSubZone = false
+                    parentZoneId = 0L
+                }
+                ZoneTypeChip(
+                    label = "Подзона",
+                    selected = isSubZone,
+                    onHelp = { showSubZoneHelp = true },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    isSubZone = true
+                }
+            }
+
+            if (isSubZone) {
+                Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp)) {
+                    OutlinedButton(
+                        onClick = { showParentMenu = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = tc.accent),
+                    ) {
+                        Text(
+                            selectedParentZone?.name ?: "Избери основна зона",
+                            modifier = Modifier.weight(1f),
+                            textAlign = TextAlign.Start,
+                            maxLines = 1,
+                        )
+                        Icon(Icons.Default.ArrowDropDown, null)
+                    }
+                    DropdownMenu(
+                        expanded = showParentMenu,
+                        onDismissRequest = { showParentMenu = false },
+                        modifier = Modifier.background(tc.card),
+                    ) {
+                        otherZones.filter { it.parentZoneId == 0L }.forEach { zone ->
+                            DropdownMenuItem(
+                                text = { Text(zone.name, color = if (zone.id == parentZoneId) tc.accent else tc.textPrimary) },
+                                onClick = {
+                                    parentZoneId = zone.id
+                                    showParentMenu = false
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+
             // Instruction / corner count
             Text(
                 if (markerStates.size < 3)
@@ -352,6 +423,14 @@ fun ZoneCreatorScreen(
             if (overlappingNames.isNotEmpty()) {
                 Text(
                     "⚠ ${st.zones.zoneOverlapWarning}: ${overlappingNames.joinToString(", ")}",
+                    color = Color(0xFFFF9A3C), fontSize = 11.sp,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
+                )
+            }
+
+            if (subZoneOutsideParent) {
+                Text(
+                    "⚠ Някоя точка на подзоната е извън избраната основна зона.",
                     color = Color(0xFFFF9A3C), fontSize = 11.sp,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
                 )
@@ -393,9 +472,10 @@ fun ZoneCreatorScreen(
                                 name       = zoneName.trim(),
                                 pointsJson = serializeZonePoints(savePoints),
                                 color      = colorArgb,
+                                parentZoneId = if (isSubZone) parentZoneId else 0L,
                             ))
                         } else {
-                            rideVm.addZone(zoneName.trim(), savePoints, colorArgb)
+                            rideVm.addZone(zoneName.trim(), savePoints, colorArgb, if (isSubZone) parentZoneId else 0L)
                         }
                         onBack()
                     },
@@ -506,5 +586,79 @@ fun ZoneCreatorScreen(
                 }
             }
         }
+
+        if (showMainZoneHelp) {
+            ZoneTypeHelpDialog(
+                title = "Основна зона",
+                text = "Голяма зона или район. Курсовете в нея се броят към общата статистика на тази зона, включително ако попадат и в нейна подзона.",
+                onDismiss = { showMainZoneHelp = false },
+            )
+        }
+        if (showSubZoneHelp) {
+            ZoneTypeHelpDialog(
+                title = "Подзона",
+                text = "По-малка зона вътре в основна зона. Курсът се брои и към основната зона, и отделно към подзоната, за по-точна статистика.",
+                onDismiss = { showSubZoneHelp = false },
+            )
+        }
     }
+}
+
+@Composable
+private fun ZoneTypeChip(
+    label: String,
+    selected: Boolean,
+    onHelp: () -> Unit,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    Row(
+        modifier
+            .background(
+                if (selected) tc.accent.copy(alpha = 0.16f) else tc.card.copy(alpha = 0.92f),
+                RoundedCornerShape(12.dp),
+            )
+            .border(
+                1.dp,
+                if (selected) tc.accent else tc.muted.copy(alpha = 0.35f),
+                RoundedCornerShape(12.dp),
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            label,
+            color = if (selected) tc.accent else tc.textPrimary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+        )
+        IconButton(onClick = onHelp, modifier = Modifier.size(24.dp)) {
+            Icon(Icons.Default.HelpOutline, null, tint = tc.muted, modifier = Modifier.size(16.dp))
+        }
+    }
+}
+
+@Composable
+private fun ZoneTypeHelpDialog(
+    title: String,
+    text: String,
+    onDismiss: () -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = tc.card,
+        title = { Text(title, color = tc.textPrimary, fontWeight = FontWeight.Bold) },
+        text = { Text(text, color = tc.muted, fontSize = 14.sp) },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("OK", color = tc.accent, fontWeight = FontWeight.Bold)
+            }
+        },
+    )
 }

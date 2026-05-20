@@ -19,6 +19,7 @@ class RideViewModel(app: Application) : AndroidViewModel(app) {
     private val shiftDao   = AppDatabase.getInstance(app).shiftDao()
     private val zoneDao    = AppDatabase.getInstance(app).zoneDao()
     private val zoneWaitDao = AppDatabase.getInstance(app).zoneWaitDao()
+    private val shiftPauseDao = AppDatabase.getInstance(app).shiftPauseDao()
     private val tariffDao  = AppDatabase.getInstance(app).tariffDao()
     private val expenseDao = AppDatabase.getInstance(app).tariffExpenseDao()
 
@@ -26,6 +27,7 @@ class RideViewModel(app: Application) : AndroidViewModel(app) {
     val allShifts:   Flow<List<Shift>>          = shiftDao.getAllShifts()
     val allZones:    Flow<List<Zone>>           = zoneDao.getAllZones()
     val allZoneWaitSessions: Flow<List<ZoneWaitSession>> = zoneWaitDao.getAllSessions()
+    val allShiftPauseSessions: Flow<List<ShiftPauseSession>> = shiftPauseDao.getAllSessions()
     val allTariffs:  Flow<List<Tariff>>         = tariffDao.getAll()
     val allExpenses: Flow<List<TariffExpense>>  = expenseDao.getAll()
 
@@ -46,6 +48,9 @@ class RideViewModel(app: Application) : AndroidViewModel(app) {
 
     fun getRidesByShift(shiftId: Long): Flow<List<Ride>> = dao.getRidesByShiftId(shiftId)
 
+    fun getRidesForShift(shift: Shift): Flow<List<Ride>> =
+        dao.getRidesForShift(shift.id, shift.shiftNumber, shift.startTime, shift.endTime)
+
     fun updateRide(ride: Ride) = viewModelScope.launch { dao.updateRide(ride) }
 
     fun deleteRide(ride: Ride) = viewModelScope.launch {
@@ -55,19 +60,22 @@ class RideViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteShift(shift: Shift) = viewModelScope.launch {
         dao.deleteByShiftId(shift.id)
         zoneWaitDao.deleteByShiftId(shift.id)
+        shiftPauseDao.deleteByShiftId(shift.id)
         shiftDao.deleteShift(shift)
     }
 
     fun getZoneWaitsByShift(shiftId: Long): Flow<List<ZoneWaitSession>> = zoneWaitDao.getSessionsByShift(shiftId)
+    fun getShiftPausesByShift(shiftId: Long): Flow<List<ShiftPauseSession>> = shiftPauseDao.getSessionsByShift(shiftId)
 
     // ── Zone management ───────────────────────────────────────────
 
-    fun addZone(name: String, points: List<LatLng>, colorArgb: Int) = viewModelScope.launch {
+    fun addZone(name: String, points: List<LatLng>, colorArgb: Int, parentZoneId: Long = 0L) = viewModelScope.launch {
         zoneDao.insertZone(
             Zone(
                 name       = name.trim(),
                 pointsJson = serializeZonePoints(points),
                 color      = colorArgb,
+                parentZoneId = parentZoneId,
             )
         )
     }

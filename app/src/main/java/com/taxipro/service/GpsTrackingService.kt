@@ -17,6 +17,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 
 class GpsTrackingService : Service() {
 
@@ -232,6 +233,7 @@ class GpsTrackingService : Service() {
 
     private fun handleLocation(location: Location) {
         val accuracy = location.accuracy
+        val speedKmh = location.speed * 3.6
 
         // ── Shift-level km (always, regardless of ride state) ──
         // Accuracy threshold 150m: urban canyons often report 50–120m accuracy even with a working
@@ -251,9 +253,11 @@ class GpsTrackingService : Service() {
         }
 
         // ── Ride-level tracking ────────────────────────────────
-        if (!isTracking || isPaused) return
+        if (!isTracking || isPaused) {
+            broadcastShiftOnlyUpdate(location, speedKmh)
+            return
+        }
 
-        val speedKmh = location.speed * 3.6
         lastUpdateMs = System.currentTimeMillis()
 
         if (accuracy <= accuracyCap) {
@@ -316,6 +320,20 @@ class GpsTrackingService : Service() {
         sendBroadcast(broadcast)
     }
 
+    private fun broadcastShiftOnlyUpdate(location: Location, speedKmh: Double) {
+        if (!isShiftTracking) return
+
+        updateNotification("🚕 Смяна • %.1f km".format(shiftTotalKm))
+        val broadcast = Intent(BROADCAST_UPDATE).apply {
+            setPackage(packageName)
+            putExtra(EXTRA_LAT,      location.latitude)
+            putExtra(EXTRA_LNG,      location.longitude)
+            putExtra(EXTRA_SPEED,    speedKmh)
+            putExtra(EXTRA_SHIFT_KM, shiftTotalKm)
+        }
+        sendBroadcast(broadcast)
+    }
+
     private fun pauseTracking() {
         isPaused = true
         if (waitingStartMs > 0L) {
@@ -338,6 +356,8 @@ class GpsTrackingService : Service() {
 
         // If shift is still active keep GPS running (lighter interval), else stop
         if (isShiftTracking) {
+            // Start waiting in the current zone immediately after dropoff if we're already parked.
+            (lastGoodLocation ?: lastLocation)?.let { updateZoneWaitState(it) }
             startLocationUpdates(intervalMs = 3000L)
             updateNotification("🚕 Смяна активна")
         } else {
@@ -393,7 +413,13 @@ class GpsTrackingService : Service() {
             closeActiveZoneWait(location.time)
             return
         }
-        val zone = findZone(location.latitude, location.longitude, cachedZones)
+        val zones = if (cachedZones.isNotEmpty()) {
+            cachedZones
+        } else {
+            runBlocking(Dispatchers.IO) { db.zoneDao().getAllZonesOnce() }
+                .also { loaded -> cachedZones = loaded }
+        }
+        val zone = findZone(location.latitude, location.longitude, zones)
         if (zone == null) {
             closeActiveZoneWait(location.time)
             return

@@ -16,13 +16,22 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.taxipro.data.db.Ride
+import com.taxipro.data.db.ExpenseFrequency
+import com.taxipro.data.db.ExpenseType
+import com.taxipro.data.db.MonthlyExpenseMode
 import com.taxipro.data.db.Shift
+import com.taxipro.data.db.ShiftPauseSession
+import com.taxipro.data.db.TariffExpense
 import com.taxipro.data.db.Zone
 import com.taxipro.data.db.ZoneStat
 import com.taxipro.data.db.ZoneWaitSession
 import com.taxipro.data.db.computeZoneStats
+import com.taxipro.data.db.effectiveShiftKm
 import com.taxipro.data.db.formatPrice
 import com.taxipro.data.db.longestZoneWait
+import com.taxipro.data.db.expType
+import com.taxipro.data.db.freq
+import com.taxipro.data.db.monthMode
 import com.taxipro.ui.theme.LocalSettings
 import com.taxipro.ui.theme.LocalStrings
 import com.taxipro.ui.viewmodel.RideViewModel
@@ -38,6 +47,94 @@ private fun formatDurationForSummary(totalMs: Long): String {
     return if (hours > 0) "${hours}ч ${minutes}м" else "${minutes}м"
 }
 
+private fun pauseDurationInsideShift(
+    pauseSessions: List<ShiftPauseSession>,
+    shiftStartMs: Long,
+    shiftEndMs: Long,
+): Long = pauseSessions.sumOf { pause ->
+    val pauseEnd = when {
+        pause.endTime > 0L -> pause.endTime
+        pause.durationMs > 0L -> pause.startTime + pause.durationMs
+        else -> shiftEndMs
+    }
+    val overlapStart = maxOf(pause.startTime, shiftStartMs)
+    val overlapEnd = minOf(pauseEnd, shiftEndMs)
+    (overlapEnd - overlapStart).coerceAtLeast(0L)
+}
+
+private fun startOfDay(ms: Long): Long {
+    val c = Calendar.getInstance().apply { timeInMillis = ms }
+    c.set(Calendar.HOUR_OF_DAY, 0)
+    c.set(Calendar.MINUTE, 0)
+    c.set(Calendar.SECOND, 0)
+    c.set(Calendar.MILLISECOND, 0)
+    return c.timeInMillis
+}
+
+private fun startOfWeek(ms: Long): Long {
+    val c = Calendar.getInstance().apply { timeInMillis = ms }
+    c.set(Calendar.DAY_OF_WEEK, c.firstDayOfWeek)
+    return startOfDay(c.timeInMillis)
+}
+
+private fun startOfMonth(ms: Long): Long {
+    val c = Calendar.getInstance().apply { timeInMillis = ms }
+    c.set(Calendar.DAY_OF_MONTH, 1)
+    return startOfDay(c.timeInMillis)
+}
+
+private fun daysInMonth(ms: Long): Int {
+    val c = Calendar.getInstance().apply { timeInMillis = ms }
+    return c.getActualMaximum(Calendar.DAY_OF_MONTH).coerceAtLeast(1)
+}
+
+private fun estimateShiftCustomExpenses(
+    expenses: List<TariffExpense>,
+    rideCount: Int,
+    grossTotal: Double,
+    shiftsSameDay: Int,
+    shiftsSameWeek: Int,
+    shiftMonthDays: Int,
+): Double = expenses.sumOf { exp ->
+    when (exp.freq) {
+        ExpenseFrequency.PER_DAY -> if (exp.expType == ExpenseType.FIXED) {
+            exp.amount / shiftsSameDay.coerceAtLeast(1)
+        } else {
+            grossTotal * exp.amount / 100.0
+        }
+        ExpenseFrequency.PER_WEEK -> if (exp.expType == ExpenseType.FIXED) {
+            exp.amount / shiftsSameWeek.coerceAtLeast(1)
+        } else {
+            grossTotal * exp.amount / 100.0
+        }
+        ExpenseFrequency.PER_RIDE -> if (exp.expType == ExpenseType.FIXED) {
+            exp.amount * rideCount
+        } else {
+            grossTotal * exp.amount / 100.0
+        }
+        ExpenseFrequency.PER_SHIFT -> if (exp.expType == ExpenseType.FIXED) {
+            exp.amount
+        } else {
+            grossTotal * exp.amount / 100.0
+        }
+        ExpenseFrequency.PER_MONTH -> if (exp.expType == ExpenseType.FIXED) {
+            val divisor = when (exp.monthMode) {
+                MonthlyExpenseMode.MANUAL -> exp.manualWorkDays.coerceAtLeast(1)
+                MonthlyExpenseMode.AUTO -> shiftMonthDays.coerceAtLeast(1)
+            }
+            (exp.amount / divisor) / shiftsSameDay.coerceAtLeast(1)
+        } else {
+            grossTotal * exp.amount / 100.0
+        }
+    }
+        .toDouble()
+}
+
+private fun normalizedShiftExpenses(allExpenses: List<TariffExpense>): List<TariffExpense> =
+    allExpenses
+        .groupBy { listOf(it.name, it.frequency, it.type, it.amount).joinToString("|") }
+        .map { it.value.first() }
+
 @Composable
 fun ShiftSummaryScreen(
     shift: Shift,
@@ -47,7 +144,19 @@ fun ShiftSummaryScreen(
     val rides by rideVm.getRidesByShift(shift.id).collectAsState(initial = emptyList())
     val zones by rideVm.allZones.collectAsState(initial = emptyList())
     val zoneWaits by rideVm.getZoneWaitsByShift(shift.id).collectAsState(initial = emptyList())
-    ShiftSummaryContent(shift = shift, rides = rides, zones = zones, zoneWaits = zoneWaits, onDismiss = onDismiss)
+    val pauseSessions by rideVm.getShiftPausesByShift(shift.id).collectAsState(initial = emptyList())
+    val allExpenses by rideVm.allExpenses.collectAsState(initial = emptyList())
+    val allShifts by rideVm.allShifts.collectAsState(initial = emptyList())
+    ShiftSummaryContent(
+        shift = shift,
+        rides = rides,
+        zones = zones,
+        zoneWaits = zoneWaits,
+        pauseSessions = pauseSessions,
+        allExpenses = allExpenses,
+        allShifts = allShifts,
+        onDismiss = onDismiss,
+    )
 }
 
 @Composable
@@ -56,6 +165,9 @@ fun ShiftSummaryContent(
     rides: List<Ride>,
     zones: List<Zone> = emptyList(),
     zoneWaits: List<ZoneWaitSession> = emptyList(),
+    pauseSessions: List<ShiftPauseSession> = emptyList(),
+    allExpenses: List<TariffExpense> = emptyList(),
+    allShifts: List<Shift> = emptyList(),
     onDismiss: () -> Unit,
 ) {
     val tc       = LocalThemeColors.current
@@ -63,7 +175,10 @@ fun ShiftSummaryContent(
     val settings = LocalSettings.current
     val sdf      = SimpleDateFormat("HH:mm", Locale.getDefault())
 
-    val durationMs  = (if (shift.endTime > 0) shift.endTime else System.currentTimeMillis()) - shift.startTime
+    val shiftEndMs = if (shift.endTime > 0) shift.endTime else System.currentTimeMillis()
+    val grossDurationMs = (shiftEndMs - shift.startTime).coerceAtLeast(0L)
+    val pauseDurationMs = pauseDurationInsideShift(pauseSessions, shift.startTime, shiftEndMs)
+    val durationMs = (grossDurationMs - pauseDurationMs).coerceAtLeast(0L)
     val durationH   = durationMs / 3_600_000L
     val durationMin = (durationMs % 3_600_000L) / 60_000L
     val durationHD  = durationMs / 3_600_000.0
@@ -77,12 +192,30 @@ fun ShiftSummaryContent(
     // Fuel cost uses total shift km (GPS-only, no adjustment km).
     // Fall back to GPS ride km sum if shift.totalKm wasn't recorded (legacy shifts).
     val totalGpsKm   = rides.sumOf { it.kilometers - it.adjustmentKm }
-    val shiftKm      = if (shift.totalKm > 0.0) shift.totalKm else totalGpsKm
+    val shiftKm      = effectiveShiftKm(shift.totalKm, totalKm)
     val avgFuelCostPerKm = if (rides.isNotEmpty())
         rides.sumOf { it.fuelCostPerKm } / rides.size else 0.0
     val fuelCost     = shiftKm * avgFuelCostPerKm
     val taxCost      = rides.sumOf { it.price * it.taxPercent / 100.0 }
-    val netProfit    = totalRevenue + totalTips - fuelCost - taxCost
+    val shiftDayStart = remember(shift.startTime) { startOfDay(shift.startTime) }
+    val shiftWeekStart = remember(shift.startTime) { startOfWeek(shift.startTime) }
+    val shiftsSameDay = remember(allShifts, shiftDayStart) {
+        allShifts.count { startOfDay(it.startTime) == shiftDayStart }.coerceAtLeast(1)
+    }
+    val shiftsSameWeek = remember(allShifts, shiftWeekStart) {
+        allShifts.count { startOfWeek(it.startTime) == shiftWeekStart }.coerceAtLeast(1)
+    }
+    val shiftMonthDays = remember(shift.startTime) { daysInMonth(shift.startTime) }
+    val shiftExpenses = remember(allExpenses) { normalizedShiftExpenses(allExpenses) }
+    val customExpenseCost = estimateShiftCustomExpenses(
+        shiftExpenses,
+        rides.size,
+        totalRevenue + totalTips,
+        shiftsSameDay,
+        shiftsSameWeek,
+        shiftMonthDays,
+    )
+    val netProfit    = totalRevenue + totalTips - fuelCost - taxCost - customExpenseCost
 
     val avgFuelRate  = if (shiftKm > 0) fuelCost / shiftKm else 0.0
     val avgTaxRate   = if (totalRevenue > 0) taxCost / totalRevenue * 100.0 else 0.0
@@ -169,6 +302,18 @@ fun ShiftSummaryContent(
         }
 
         // ── Payment method breakdown ──────────────────────────
+        longestZoneWait?.let { wait ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                SummaryCard(
+                    Icons.Default.Schedule,
+                    "Най-дълго чакане",
+                    wait.zoneName,
+                    "${formatDurationForSummary(wait.durationMs)} • ${sdf.format(Date(wait.startTime))} - ${sdf.format(Date(wait.endTime))}",
+                    Color(0xFF26A69A),
+                    Modifier.fillMaxWidth()
+                )
+            }
+        }
         val cardRides = rides.count { it.paymentMethod == "CARD" }
         val cashRides = rides.size - cardRides
         if (rides.isNotEmpty()) {
@@ -191,6 +336,7 @@ fun ShiftSummaryContent(
                 Triple(st.tipsLabel,     "+${settings.formatPrice(totalTips)}",    tc.purple),
                 Triple(fuelRowLabel,     "-${settings.formatPrice(fuelCost)}",     tc.red),
                 Triple(taxRowLabel,      "-${settings.formatPrice(taxCost)}",      tc.red),
+                Triple(st.expensesSection.replace("💸  ", ""), "-${settings.formatPrice(customExpenseCost)}", tc.red),
                 Triple(st.netProfit,     "+${settings.formatPrice(netProfit)}",    tc.green),
             ).forEach { (label, value, color) ->
                 Row(
@@ -207,32 +353,6 @@ fun ShiftSummaryContent(
 
         // ── Zone breakdown ───────────────────────────────────
         ShiftZoneStatsSection(rides = rides, zones = zones)
-
-        longestZoneWait?.let { wait ->
-            StatsSection("Чакане в зона") {
-                Row(
-                    Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(wait.zoneName, color = tc.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            "${sdf.format(Date(wait.startTime))} - ${sdf.format(Date(wait.endTime))}",
-                            color = tc.muted,
-                            fontSize = 11.sp,
-                        )
-                    }
-                    Text(
-                        formatDurationForSummary(wait.durationMs),
-                        color = tc.accent,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
-                    )
-                }
-            }
-        }
 
         // ── Ride list ────────────────────────────────────────
         if (rides.isNotEmpty()) {
@@ -448,3 +568,4 @@ private fun SummaryCard(
         }
     }
 }
+
