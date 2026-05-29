@@ -14,6 +14,7 @@ class PremiumViewModel(application: Application) : AndroidViewModel(application)
 
     val isPremium      = billing.isPremium
     val purchaseState  = billing.purchaseState
+    val debugPlanOverride = billing.debugPlanOverride
 
     // Product details for each plan
     val detailsMonthly  = billing.detailsMonthly
@@ -29,6 +30,8 @@ class PremiumViewModel(application: Application) : AndroidViewModel(application)
     fun restore() = viewModelScope.launch { billing.restorePurchases() }
 
     fun resetState() = billing.resetPurchaseState()
+
+    fun setDebugPlanOverride(value: String?) = billing.setDebugPlanOverride(value)
 
     override fun onCleared() {
         super.onCleared()

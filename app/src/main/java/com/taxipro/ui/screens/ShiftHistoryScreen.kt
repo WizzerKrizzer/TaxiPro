@@ -8,6 +8,8 @@ import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -33,6 +35,7 @@ import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.LatLngBounds
 import com.google.maps.android.compose.*
+import com.taxipro.data.db.AppSettings
 import com.taxipro.data.db.Ride
 import com.taxipro.data.db.ExpenseFrequency
 import com.taxipro.data.db.ExpenseType
@@ -51,6 +54,8 @@ import com.taxipro.data.db.monthMode
 import com.taxipro.ui.theme.LocalSettings
 import com.taxipro.ui.theme.LocalStrings
 import com.taxipro.ui.viewmodel.RideViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -163,17 +168,24 @@ private enum class ShiftHistorySort {
     NEWEST, REVENUE, DURATION, RIDES, TOTAL_KM, CLIENT_KM
 }
 
+private data class ShiftHistoryComputedData(
+    val filteredShifts: List<Shift> = emptyList(),
+    val displayedShifts: List<Shift> = emptyList(),
+)
+
 
 @Composable
 fun ShiftHistoryScreen(rideVm: RideViewModel) {
     val tc        = LocalThemeColors.current
     val st        = LocalStrings.current
+    val filterText = currentFilterUiText()
     val allShifts by rideVm.allShifts.collectAsState(initial = emptyList())
     val allRides  by rideVm.allRides.collectAsState(initial = emptyList())
     var expandedId by remember { mutableStateOf<Long?>(null) }
     var detailShiftId by remember { mutableStateOf<Long?>(null) }
     var sortBy by remember { mutableStateOf(ShiftHistorySort.NEWEST) }
     var sortAsc by remember { mutableStateOf(false) }
+    var visibleShiftCount by remember { mutableIntStateOf(30) }
 
     val nowMs        = remember { System.currentTimeMillis() }
     val initWeek     = remember { pfCurrentWeekRange() }
@@ -196,68 +208,87 @@ fun ShiftHistoryScreen(rideVm: RideViewModel) {
     val maxHours   = hoursFilter.takeIf { !appliedHoursFilterIsMin }
 
     val ridesByShift = remember(allRides) { allRides.filter { it.shiftId > 0L }.groupBy { it.shiftId } }
-    val filteredShifts = remember(allShifts, ridesByShift, filterFromMs, filterToMs, minRevenue, maxRevenue, minHours, maxHours) {
-        allShifts.filter { shift ->
-            val inPeriod = filterFromMs == null || filterToMs == null ||
-                shift.startTime in filterFromMs!!..filterToMs!!
-            val rides = ridesByShift[shift.id].orEmpty().ifEmpty {
-                ridesByShift[shift.shiftNumber].orEmpty().filter { ride ->
-                    ride.startTime >= shift.startTime &&
-                        (shift.endTime <= 0L || ride.startTime <= shift.endTime)
-                }
-            }
-            val revenue = rides.sumOf { it.price + it.tip }
-            val endMs = if (shift.endTime > 0) shift.endTime else System.currentTimeMillis()
-            val hours = ((endMs - shift.startTime).coerceAtLeast(0L)) / 3_600_000.0
-            inPeriod &&
-                (minRevenue == null || revenue >= minRevenue) &&
-                (maxRevenue == null || revenue <= maxRevenue) &&
-                (minHours == null || hours >= minHours) &&
-                (maxHours == null || hours <= maxHours)
-        }
-    }
-    val displayed = remember(filteredShifts, ridesByShift, sortBy, sortAsc) {
-        fun ridesFor(shift: Shift): List<Ride> =
-            ridesByShift[shift.id].orEmpty().ifEmpty {
-                ridesByShift[shift.shiftNumber].orEmpty().filter { ride ->
-                    ride.startTime >= shift.startTime &&
-                        (shift.endTime <= 0L || ride.startTime <= shift.endTime)
-                }
-            }
-        val comparator = when (sortBy) {
-            ShiftHistorySort.NEWEST -> compareBy<Shift> { it.startTime }
-            ShiftHistorySort.REVENUE -> compareBy { shift -> ridesFor(shift).sumOf { it.price + it.tip } }
-            ShiftHistorySort.DURATION -> compareBy { shift ->
-                val endMs = if (shift.endTime > 0) shift.endTime else System.currentTimeMillis()
-                (endMs - shift.startTime).coerceAtLeast(0L)
-            }
-            ShiftHistorySort.RIDES -> compareBy { shift -> ridesFor(shift).size }
-            ShiftHistorySort.TOTAL_KM -> compareBy { shift ->
-                val rides = ridesFor(shift)
-                effectiveShiftKm(shift.totalKm, rides.sumOf { it.kilometers })
-            }
-            ShiftHistorySort.CLIENT_KM -> compareBy { shift -> ridesFor(shift).sumOf { it.kilometers } }
-        }
-        if (sortAsc) filteredShifts.sortedWith(comparator)
-        else filteredShifts.sortedWith(comparator.reversed())
-    }
+    var computedData by remember { mutableStateOf(ShiftHistoryComputedData()) }
+    var isComputing by remember { mutableStateOf(false) }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(tc.background)
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp)
+    LaunchedEffect(
+        allShifts, ridesByShift, filterFromMs, filterToMs, minRevenue, maxRevenue, minHours, maxHours,
+        sortBy, sortAsc,
     ) {
-        Spacer(Modifier.height(16.dp))
-        Text(st.shiftHistoryScreen, color = tc.textPrimary,
-            fontSize = 22.sp, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(4.dp))
-        Text(st.shiftsRecorded.format(displayed.size), color = tc.muted, fontSize = 13.sp)
-        Spacer(Modifier.height(8.dp))
+        isComputing = true
+        computedData = withContext(Dispatchers.Default) {
+            fun ridesFor(shift: Shift): List<Ride> =
+                ridesByShift[shift.id].orEmpty().ifEmpty {
+                    ridesByShift[shift.shiftNumber].orEmpty().filter { ride ->
+                        ride.startTime >= shift.startTime &&
+                            (shift.endTime <= 0L || ride.startTime <= shift.endTime)
+                    }
+                }
 
-        PeriodFilterRow(onRangeChanged = { f, t -> filterFromMs = f; filterToMs = t })
-        ShiftHistoryFilters(
+            val filteredShifts = allShifts.filter { shift ->
+                val inPeriod = filterFromMs == null || filterToMs == null ||
+                    shift.startTime in filterFromMs!!..filterToMs!!
+                val rides = ridesFor(shift)
+                val revenue = rides.sumOf { it.price + it.tip }
+                val endMs = if (shift.endTime > 0) shift.endTime else System.currentTimeMillis()
+                val hours = ((endMs - shift.startTime).coerceAtLeast(0L)) / 3_600_000.0
+                inPeriod &&
+                    (minRevenue == null || revenue >= minRevenue) &&
+                    (maxRevenue == null || revenue <= maxRevenue) &&
+                    (minHours == null || hours >= minHours) &&
+                    (maxHours == null || hours <= maxHours)
+            }
+
+            val comparator = when (sortBy) {
+                ShiftHistorySort.NEWEST -> compareBy<Shift> { it.startTime }
+                ShiftHistorySort.REVENUE -> compareBy { shift -> ridesFor(shift).sumOf { it.price + it.tip } }
+                ShiftHistorySort.DURATION -> compareBy { shift ->
+                    val endMs = if (shift.endTime > 0) shift.endTime else System.currentTimeMillis()
+                    (endMs - shift.startTime).coerceAtLeast(0L)
+                }
+                ShiftHistorySort.RIDES -> compareBy { shift -> ridesFor(shift).size }
+                ShiftHistorySort.TOTAL_KM -> compareBy { shift ->
+                    val rides = ridesFor(shift)
+                    effectiveShiftKm(shift.totalKm, rides.sumOf { it.kilometers })
+                }
+                ShiftHistorySort.CLIENT_KM -> compareBy { shift -> ridesFor(shift).sumOf { it.kilometers } }
+            }
+
+            ShiftHistoryComputedData(
+                filteredShifts = filteredShifts,
+                displayedShifts = if (sortAsc) filteredShifts.sortedWith(comparator)
+                else filteredShifts.sortedWith(comparator.reversed()),
+            )
+        }
+        isComputing = false
+    }
+    val filteredShifts = computedData.filteredShifts
+    val displayed = computedData.displayedShifts
+    LaunchedEffect(filteredShifts, sortBy, sortAsc) {
+        visibleShiftCount = 30
+    }
+
+    var pendingDelete by remember { mutableStateOf<(() -> Unit)?>(null) }
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(tc.background),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        item {
+            Text(st.shiftHistoryScreen, color = tc.textPrimary,
+                fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        }
+        item {
+            Text(st.shiftsRecorded.format(displayed.size), color = tc.muted, fontSize = 13.sp)
+        }
+        item {
+            PeriodFilterRow(onRangeChanged = { f, t -> filterFromMs = f; filterToMs = t })
+        }
+        item {
+            ShiftHistoryFilters(
             revenueText = revenueFilterText,
             hoursText = hoursFilterText,
             revenueIsMin = revenueFilterIsMin,
@@ -293,69 +324,88 @@ fun ShiftHistoryScreen(rideVm: RideViewModel) {
                 appliedHoursFilterIsMin = true
             },
         )
-        ShiftHistorySortRow(
-            selected = sortBy,
-            ascending = sortAsc,
-            onSelected = { sortBy = it },
-            onToggleDirection = { sortAsc = !sortAsc },
-        )
-        Spacer(Modifier.height(6.dp))
-
-        var pendingDelete by remember { mutableStateOf<(() -> Unit)?>(null) }
-
-        if (displayed.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(st.noShifts, color = tc.muted, fontSize = 14.sp)
-            }
-        } else {
-            Column(
-                Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                displayed.forEach { shift ->
-                    key(shift.id) {
-                        SwipeToDeleteBox(onDeleteRequest = { pendingDelete = { rideVm.deleteShift(shift) } }) {
-                            ShiftCard(
-                                shift      = shift,
-                                rideVm     = rideVm,
-                                isExpanded = expandedId == shift.id,
-                                onToggle   = { expandedId = if (expandedId == shift.id) null else shift.id },
-                                onDelete   = { pendingDelete = { rideVm.deleteShift(shift) } },
-                                onOpenDetail = { detailShiftId = shift.id },
-                            )
-                        }
-                    }
-                }
-                Spacer(Modifier.height(80.dp))
-            }
         }
-
-        pendingDelete?.let { action ->
-            DeleteConfirmDialog(
-                message   = st.history.deleteShiftConfirmMsg,
-                onConfirm = { action(); pendingDelete = null },
-                onDismiss = { pendingDelete = null },
+        item {
+            ShiftHistorySortRow(
+                selected = sortBy,
+                ascending = sortAsc,
+                onSelected = { sortBy = it },
+                onToggleDirection = { sortAsc = !sortAsc },
             )
         }
-
-        detailShiftId?.let { selectedId ->
-            val currentIndex = displayed.indexOfFirst { it.id == selectedId }
-            val currentShift = displayed.getOrNull(currentIndex)
-            if (currentShift != null) {
-                val prevShift = displayed.getOrNull(currentIndex - 1)
-                val nextShift = displayed.getOrNull(currentIndex + 1)
-                val shiftRides = rideVm.getRidesForShift(currentShift).collectAsState(initial = emptyList()).value
-                val zones = rideVm.allZones.collectAsState(initial = emptyList()).value
-                ShiftDetailDialog(
-                    shift = currentShift,
-                    rides = shiftRides,
-                    zones = zones,
-                    rideVm = rideVm,
-                    onDismiss = { detailShiftId = null },
-                    onPrevShift = prevShift?.let { { detailShiftId = it.id } },
-                    onNextShift = nextShift?.let { { detailShiftId = it.id } },
-                )
+        if (isComputing) {
+            item {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 24.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CircularProgressIndicator(color = tc.accent, modifier = Modifier.size(28.dp))
+                }
             }
+        } else if (displayed.isEmpty()) {
+            item {
+                Box(Modifier.fillParentMaxWidth().padding(vertical = 48.dp), contentAlignment = Alignment.Center) {
+                    Text(st.noShifts, color = tc.muted, fontSize = 14.sp)
+                }
+            }
+        } else {
+            items(items = displayed.take(visibleShiftCount), key = { it.id }) { shift ->
+                SwipeToDeleteBox(onDeleteRequest = { pendingDelete = { rideVm.deleteShift(shift) } }) {
+                    ShiftCard(
+                        shift      = shift,
+                        rideVm     = rideVm,
+                        isExpanded = expandedId == shift.id,
+                        onToggle   = { expandedId = if (expandedId == shift.id) null else shift.id },
+                        onDelete   = { pendingDelete = { rideVm.deleteShift(shift) } },
+                        onOpenDetail = { detailShiftId = shift.id },
+                    )
+                }
+            }
+            if (visibleShiftCount < displayed.size) {
+                item {
+                    OutlinedButton(
+                        onClick = { visibleShiftCount += 30 },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, tc.accent),
+                    ) {
+                        Text(
+                            filterText.loadMore.format(displayed.size - visibleShiftCount),
+                            color = tc.accent,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
+            }
+            item { Spacer(Modifier.height(80.dp)) }
+        }
+    }
+    pendingDelete?.let { action ->
+        DeleteConfirmDialog(
+            message   = st.history.deleteShiftConfirmMsg,
+            onConfirm = { action(); pendingDelete = null },
+            onDismiss = { pendingDelete = null },
+        )
+    }
+    detailShiftId?.let { selectedId ->
+        val currentIndex = displayed.indexOfFirst { it.id == selectedId }
+        val currentShift = displayed.getOrNull(currentIndex)
+        if (currentShift != null) {
+            val prevShift = displayed.getOrNull(currentIndex - 1)
+            val nextShift = displayed.getOrNull(currentIndex + 1)
+            val shiftRides = rideVm.getRidesForShift(currentShift).collectAsState(initial = emptyList()).value
+            val zones = rideVm.allZones.collectAsState(initial = emptyList()).value
+            ShiftDetailDialog(
+                shift = currentShift,
+                rides = shiftRides,
+                zones = zones,
+                rideVm = rideVm,
+                onDismiss = { detailShiftId = null },
+                onPrevShift = prevShift?.let { { detailShiftId = it.id } },
+                onNextShift = nextShift?.let { { detailShiftId = it.id } },
+            )
         }
     }
 }
@@ -428,6 +478,7 @@ private fun ShiftHistoryFilters(
 ) {
     val tc = LocalThemeColors.current
     val settings = LocalSettings.current
+    val filterText = currentFilterUiText()
     val hasFilters = revenueText.isNotBlank() || hoursText.isNotBlank()
 
     Card(
@@ -441,18 +492,18 @@ private fun ShiftHistoryFilters(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Филтър на смени", color = tc.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Text(filterText.shiftFilter, color = tc.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                 if (hasFilters) {
                     TextButton(onClick = onClear, contentPadding = PaddingValues(horizontal = 8.dp)) {
                         Icon(Icons.Default.Clear, null, modifier = Modifier.size(14.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("Изчисти", fontSize = 11.sp)
+                        Text(filterText.clear, fontSize = 11.sp)
                     }
                 }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ShiftNumberFilter("Сума", revenueText, settings.currency.symbol, revenueIsMin, Modifier.weight(1f), onToggleRevenueMode, onRevenueChange, onApplyRevenue)
-                ShiftNumberFilter("Часове", hoursText, "ч", hoursIsMin, Modifier.weight(1f), onToggleHoursMode, onHoursChange, onApplyHours)
+                ShiftNumberFilter(filterText.amount, revenueText, settings.currency.symbol, revenueIsMin, Modifier.weight(1f), onToggleRevenueMode, onRevenueChange, onApplyRevenue)
+                ShiftNumberFilter(filterText.hours, hoursText, filterText.hoursShort, hoursIsMin, Modifier.weight(1f), onToggleHoursMode, onHoursChange, onApplyHours)
             }
         }
     }
@@ -470,6 +521,7 @@ private fun ShiftNumberFilter(
     onApply: () -> Unit,
 ) {
     val tc = LocalThemeColors.current
+    val filterText = currentFilterUiText()
     OutlinedTextField(
         value = value,
         onValueChange = { raw -> onValueChange(raw.filter { it.isDigit() || it == '.' || it == ',' }) },
@@ -489,7 +541,7 @@ private fun ShiftNumberFilter(
                 contentPadding = PaddingValues(horizontal = 4.dp),
                 modifier = Modifier.width(44.dp),
             ) {
-                Text(if (isMin) "Мин" else "Макс", color = tc.accent, fontSize = 10.sp)
+                Text(if (isMin) filterText.min else filterText.max, color = tc.accent, fontSize = 10.sp)
             }
         },
         suffix = { Text(suffix, color = tc.muted, fontSize = 10.sp) },
@@ -546,7 +598,8 @@ private fun ShiftCard(
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors   = CardDefaults.cardColors(containerColor = tc.card),
-        shape    = RoundedCornerShape(12.dp)
+        shape    = RoundedCornerShape(12.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
     ) {
         Column {
             // -- Header row -----------------------------------
@@ -771,7 +824,7 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewMo
         if (rides.isEmpty()) {
             Text(st.noRidesInShift, color = tc.muted, fontSize = 12.sp)
         } else {
-            val sortedRides = rides.sortedByDescending { it.startTime }
+            val sortedRides = remember(rides) { rides.sortedByDescending { it.startTime } }
 
             // -- Compute "best fact" badges per ride ----------
             val rideBadges: Map<Long, List<Pair<String, Color>>> = remember(rides) {
@@ -822,6 +875,7 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewMo
             }
 
             sortedRides.forEachIndexed { idx, ride ->
+                key(ride.id) {
                 val (zoneLabel, addrLabel) = remember(ride.id, zones) {
                     rideRouteLabels(ride, zones, st.zones.outsideZones)
                 }
@@ -916,6 +970,7 @@ private fun ShiftDetailPanel(shift: Shift, rides: List<Ride>, rideVm: RideViewMo
                         )
                     }
                 }
+            }
                 if (idx < sortedRides.lastIndex)
                     Spacer(Modifier.height(6.dp))
             }
@@ -1163,13 +1218,11 @@ private fun ShiftMapDialog(shift: Shift, rides: List<Ride>, onDismiss: () -> Uni
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             RideInfoStat("%.1f km".format(ride.kilometers), st.kilometersLabel, tc.muted)
                             RideInfoStat("%.0f min".format(ride.waitMinutes), st.waitLabel, tc.muted)
-                            if (ride.tip > 0) {
-                                RideInfoStat(settings.formatPrice(ride.tip), st.tipsLabel, tc.purple)
-                                RideInfoStat(settings.formatPrice(ride.price + ride.tip),
-                                    st.totalRevenue, color)
-                            } else {
-                                RideInfoStat(settings.formatPrice(ride.price), st.totalRevenue, color)
-                            }
+                            RideInfoStat(
+                                formatRideFareBreakdown(ride, settings),
+                                st.totalRevenue,
+                                color
+                            )
                         }
                     }
                 }
@@ -1620,17 +1673,10 @@ private fun ShiftDetailDialog(
                             // Right: price + tip
                             Column(horizontalAlignment = Alignment.End) {
                                 Text(
-                                    settings.formatPrice(ride.price),
+                                    formatRideFareBreakdown(ride, settings),
                                     color = tc.accent, fontSize = 13.sp,
                                     fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace
                                 )
-                                if (ride.tip > 0) {
-                                    Text(
-                                        "+${settings.formatPrice(ride.tip)}",
-                                        color = tc.purple, fontSize = 11.sp,
-                                        fontFamily = FontFamily.Monospace
-                                    )
-                                }
                             }
                             Spacer(Modifier.width(4.dp))
                             Icon(
@@ -1689,3 +1735,6 @@ private fun DetailStat(value: String, label: String, color: Color, tc: ThemeColo
             overflow = TextOverflow.Ellipsis)
     }
 }
+
+private fun formatRideFareBreakdown(ride: Ride, settings: AppSettings): String =
+    "${settings.formatPrice(ride.price)} + ${settings.formatPrice(ride.tip)} = ${settings.formatPrice(ride.price + ride.tip)}"

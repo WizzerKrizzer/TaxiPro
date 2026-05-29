@@ -75,6 +75,7 @@ fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
     val allZoneWaitSessions by vm.allZoneWaitSessions.collectAsState(initial = emptyList())
     val st          = LocalStrings.current
     val settings    = LocalSettings.current
+    val isPremium   = LocalIsPremium.current
 
     // ── Trend state ───────────────────────────────────────────
     var trendMode    by remember { mutableStateOf(TrendMode.DAY) }
@@ -450,11 +451,9 @@ fun StatsScreen(vm: RideViewModel, repo: SettingsRepository) {
         )
 
         // ── Premium gate: historical data beyond current week ──
-        run {
-            val isPremium = LocalIsPremium.current
-            if (!isPremium && activePeriod !in setOf(ActivePeriod.TODAY, ActivePeriod.WEEK)) {
-                PremiumBanner(message = st.premium.gateHintStats)
-            }
+        if (!isPremium && activePeriod !in setOf(ActivePeriod.TODAY, ActivePeriod.WEEK)) {
+            PremiumBanner(message = st.premium.gateHintStats)
+            return@Column
         }
 
         // ── Goal card (WEEK or MONTH only) ───────────────────
@@ -1148,9 +1147,10 @@ private fun StatsAdvancedFilters(
     onClear: () -> Unit,
 ) {
     val tc = LocalThemeColors.current
+    val filterText = currentFilterUiText()
     val settings = LocalSettings.current
-    val options = remember(zones, outsideLabel) {
-        listOf<Pair<String?, String>>(null to "Всички") +
+    val options = remember(zones, outsideLabel, filterText.all) {
+        listOf<Pair<String?, String>>(null to filterText.all) +
             zones.map { it.name to it.name } +
             (outsideLabel.takeIf { it.isNotBlank() }?.let { listOf(it to it) } ?: emptyList())
     }
@@ -1164,23 +1164,23 @@ private fun StatsAdvancedFilters(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Разширени филтри", color = tc.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Text(filterText.advancedFilters, color = tc.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                 if (hasFilters) {
                     TextButton(onClick = onClear, contentPadding = PaddingValues(horizontal = 8.dp)) {
                         Icon(Icons.Default.Clear, null, modifier = Modifier.size(14.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("Изчисти", fontSize = 11.sp)
+                        Text(filterText.clear, fontSize = 11.sp)
                     }
                 }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                StatsZoneDropdown("От зона", fromZoneName, options, Modifier.weight(1f), onFromSelected)
-                StatsZoneDropdown("До зона", toZoneName, options, Modifier.weight(1f), onToSelected)
+                StatsZoneDropdown(filterText.fromZone, fromZoneName, options, filterText.all, Modifier.weight(1f), onFromSelected)
+                StatsZoneDropdown(filterText.toZone, toZoneName, options, filterText.all, Modifier.weight(1f), onToSelected)
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                StatsNumberFilter("Км", kmText, settings.distanceUnit.shortLabel, kmIsMin, Modifier.weight(1f), onToggleKmMode, onKmChange, onApplyKm)
-                StatsNumberFilter("Сума", fareText, settings.currency.symbol, fareIsMin, Modifier.weight(1f), onToggleFareMode, onFareChange, onApplyFare)
-                StatsNumberFilter("Време", durationText, "мин", durationIsMin, Modifier.weight(1f), onToggleDurationMode, onDurationChange, onApplyDuration)
+                StatsNumberFilter(filterText.km, kmText, settings.distanceUnit.shortLabel, kmIsMin, Modifier.weight(1f), onToggleKmMode, onKmChange, onApplyKm)
+                StatsNumberFilter(filterText.amount, fareText, settings.currency.symbol, fareIsMin, Modifier.weight(1f), onToggleFareMode, onFareChange, onApplyFare)
+                StatsNumberFilter(filterText.time, durationText, filterText.minutesShort, durationIsMin, Modifier.weight(1f), onToggleDurationMode, onDurationChange, onApplyDuration)
             }
 }
     }
@@ -1191,6 +1191,7 @@ private fun StatsZoneDropdown(
     label: String,
     selected: String?,
     options: List<Pair<String?, String>>,
+    allLabel: String,
     modifier: Modifier = Modifier,
     onSelected: (String?) -> Unit,
 ) {
@@ -1206,7 +1207,7 @@ private fun StatsZoneDropdown(
         ) {
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
                 Text(label, color = tc.muted, fontSize = 9.sp)
-                Text(selected ?: "Всички", color = tc.textPrimary, fontSize = 12.sp, maxLines = 1)
+                Text(selected ?: allLabel, color = tc.textPrimary, fontSize = 12.sp, maxLines = 1)
             }
             Icon(Icons.Default.ArrowDropDown, null, tint = tc.accent)
         }
@@ -1236,6 +1237,7 @@ private fun StatsNumberFilter(
     onApply: () -> Unit,
 ) {
     val tc = LocalThemeColors.current
+    val filterText = currentFilterUiText()
     OutlinedTextField(
         value = value,
         onValueChange = { raw -> onValueChange(raw.filter { it.isDigit() || it == '.' || it == ',' }) },
@@ -1255,7 +1257,7 @@ private fun StatsNumberFilter(
                 contentPadding = PaddingValues(horizontal = 4.dp),
                 modifier = Modifier.width(44.dp),
             ) {
-                Text(if (isMin) "Мин" else "Макс", color = tc.accent, fontSize = 10.sp)
+                Text(if (isMin) filterText.min else filterText.max, color = tc.accent, fontSize = 10.sp)
             }
         },
         suffix = { Text(suffix, color = tc.muted, fontSize = 10.sp) },

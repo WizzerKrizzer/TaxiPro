@@ -524,7 +524,7 @@ fun ZoneCreatorScreen(
                                 LazyRow(
                                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 ) {
-                                    items(allZones) { zone ->
+                                    items(items = allZones, key = { it.id }) { zone ->
                                         val zoneColor = Color(zone.color)
                                         val isSelected = zone.color == colorArgb
                                         Column(

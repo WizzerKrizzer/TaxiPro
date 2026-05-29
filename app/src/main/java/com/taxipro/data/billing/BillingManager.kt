@@ -2,7 +2,9 @@ package com.taxipro.data.billing
 
 import android.app.Activity
 import android.content.Context
+import com.taxipro.BuildConfig
 import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.preferencesDataStore
 import com.android.billingclient.api.*
@@ -11,12 +13,15 @@ import kotlinx.coroutines.flow.*
 
 // ── DEBUG ─────────────────────────────────────────────────────────────────────
 /** Set to true to bypass billing and act as premium. MUST be false before publishing. */
-private const val DEBUG_FORCE_PREMIUM = true
+private const val DEBUG_FORCE_PREMIUM = false
+/** True only in debug builds, so local plan overrides cannot leak into release. */
+val DEBUG_PLAN_SWITCH_ENABLED: Boolean = BuildConfig.DEBUG
 
 // ── DataStore ─────────────────────────────────────────────────────────────────
 private val Context.billingDataStore by preferencesDataStore(name = "billing_prefs")
 private val KEY_PREMIUM  = booleanPreferencesKey("is_premium")
 private val KEY_LIFETIME = booleanPreferencesKey("is_lifetime")  // one-time: never revoked
+private val KEY_DEBUG_PLAN_OVERRIDE = stringPreferencesKey("debug_plan_override")
 
 /** Product IDs — must match exactly what you create in Play Console. */
 const val PRODUCT_ID_PREMIUM  = "taxipro_premium"   // one-time (lifetime)
@@ -30,11 +35,17 @@ class BillingManager(private val context: Context) : PurchasesUpdatedListener {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     // ── Premium state ─────────────────────────────────────────────────────────
-    val isPremium: Flow<Boolean> = if (DEBUG_FORCE_PREMIUM) {
-        kotlinx.coroutines.flow.flowOf(true)
-    } else {
-        context.billingDataStore.data.map { it[KEY_PREMIUM] ?: false }
+    val isPremium: Flow<Boolean> = context.billingDataStore.data.map { prefs ->
+        when {
+            DEBUG_PLAN_SWITCH_ENABLED && prefs[KEY_DEBUG_PLAN_OVERRIDE] == "free" -> false
+            DEBUG_PLAN_SWITCH_ENABLED && prefs[KEY_DEBUG_PLAN_OVERRIDE] == "premium" -> true
+            DEBUG_FORCE_PREMIUM -> true
+            else -> prefs[KEY_PREMIUM] ?: false
+        }
     }
+
+    val debugPlanOverride: Flow<String?> = context.billingDataStore.data
+        .map { it[KEY_DEBUG_PLAN_OVERRIDE] }
 
     private suspend fun setPremium(value: Boolean) {
         context.billingDataStore.edit { it[KEY_PREMIUM] = value }
@@ -261,6 +272,16 @@ class BillingManager(private val context: Context) : PurchasesUpdatedListener {
     }
 
     fun resetPurchaseState() { _purchaseState.value = PurchaseUiState.Idle }
+
+    fun setDebugPlanOverride(value: String?) {
+        if (!DEBUG_PLAN_SWITCH_ENABLED) return
+        scope.launch {
+            context.billingDataStore.edit {
+                if (value == null) it.remove(KEY_DEBUG_PLAN_OVERRIDE)
+                else it[KEY_DEBUG_PLAN_OVERRIDE] = value
+            }
+        }
+    }
 
     fun destroy() {
         billingClient.endConnection()

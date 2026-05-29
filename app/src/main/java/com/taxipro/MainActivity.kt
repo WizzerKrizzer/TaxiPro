@@ -42,6 +42,7 @@ import com.taxipro.ui.theme.ZhStrings
 import com.taxipro.ui.viewmodel.TrackingViewModel
 import com.taxipro.ui.viewmodel.RideViewModel
 import com.taxipro.ui.viewmodel.PremiumViewModel
+import com.taxipro.ui.viewmodel.AdsViewModel
 
 
 class MainActivity : ComponentActivity() {
@@ -111,10 +112,24 @@ data class NavItem(val label: String, val icon: ImageVector, val route: String)
 fun MainApp(vm: TrackingViewModel, settingsRepo: SettingsRepository) {
     val rideVm: RideViewModel = viewModel()
     val premiumVm: PremiumViewModel = viewModel()
+    val adsVm: AdsViewModel = viewModel()
     val st = LocalStrings.current
     val tc = LocalThemeColors.current
 
     val isPremium by premiumVm.isPremium.collectAsState(initial = false)
+    val trackingState by vm.state.collectAsState()
+    val creditsState by adsVm.creditsState.collectAsState()
+    val adsState by adsVm.adsState.collectAsState()
+    val adsConfig by adsVm.adsConfig.collectAsState()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val activity = context.findActivity()
+
+    LaunchedEffect(activity) {
+        activity?.let { adsVm.initialize(it) }
+    }
+    LaunchedEffect(isPremium) {
+        if (!isPremium) adsVm.preloadAds()
+    }
 
     val navItems = listOf(
         NavItem(st.navRide,     Icons.Default.Navigation, "ride"),
@@ -136,6 +151,16 @@ fun MainApp(vm: TrackingViewModel, settingsRepo: SettingsRepository) {
     CompositionLocalProvider(
         LocalIsPremium provides isPremium,
         LocalOnUpgrade provides { selected = "premium" },
+        LocalAdCreditsState provides creditsState,
+        LocalAdActions provides AdActions(
+            watchRewarded = { adsVm.watchRewardedForCredits(it) },
+            consumeRide = { cb -> adsVm.consumeRideAccess(isPremium, cb) },
+            consumeCalculator = { cb -> adsVm.consumeCalculatorAccess(isPremium, cb) },
+            buyZoneSlot = { cb -> adsVm.buyZoneSlot(isPremium, cb) },
+            recordCompletedRide = { adsVm.recordCompletedRide(it, isPremium) },
+            openAdInspector = { activity, cb -> adsVm.openAdInspector(activity, cb) },
+            refreshAdsConfig = { adsVm.refreshConfig() },
+        ),
     ) {
 
     if (lastEndedShift != null) {
@@ -150,21 +175,27 @@ fun MainApp(vm: TrackingViewModel, settingsRepo: SettingsRepository) {
     Scaffold(
         containerColor = tc.background,
         bottomBar = {
-            NavigationBar(containerColor = tc.navBar, tonalElevation = 0.dp) {
-                navItems.forEach { item ->
-                    NavigationBarItem(
-                        selected = activeTab == item.route,
-                        onClick  = { selected = item.route },
-                        icon     = { Icon(item.icon, item.label) },
-                        label    = { Text(item.label) },
-                        colors   = NavigationBarItemDefaults.colors(
-                            selectedIconColor   = tc.accent,
-                            selectedTextColor   = tc.accent,
-                            unselectedIconColor = tc.muted,
-                            unselectedTextColor = tc.muted,
-                            indicatorColor      = tc.accent.copy(alpha = 0.2f),
+            Column {
+                val showBanner = adsConfig.bannerAdsEnabled && !isPremium && adsState.canRequestAds && !(selected == "ride" && trackingState.isTracking)
+                if (showBanner) {
+                    AdMobBanner(adUnitId = adsConfig.bannerAdUnitId)
+                }
+                NavigationBar(containerColor = tc.navBar, tonalElevation = 0.dp) {
+                    navItems.forEach { item ->
+                        NavigationBarItem(
+                            selected = activeTab == item.route,
+                            onClick  = { selected = item.route },
+                            icon     = { Icon(item.icon, item.label) },
+                            label    = { Text(item.label) },
+                            colors   = NavigationBarItemDefaults.colors(
+                                selectedIconColor   = tc.accent,
+                                selectedTextColor   = tc.accent,
+                                unselectedIconColor = tc.muted,
+                                unselectedTextColor = tc.muted,
+                                indicatorColor      = tc.accent.copy(alpha = 0.2f),
+                            )
                         )
-                    )
+                    }
                 }
             }
         }

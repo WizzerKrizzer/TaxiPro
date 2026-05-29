@@ -215,6 +215,7 @@ fun ShiftSummaryContent(
         shiftsSameWeek,
         shiftMonthDays,
     )
+    val totalExpenses = fuelCost + taxCost + customExpenseCost
     val netProfit    = totalRevenue + totalTips - fuelCost - taxCost - customExpenseCost
 
     val avgFuelRate  = if (shiftKm > 0) fuelCost / shiftKm else 0.0
@@ -264,9 +265,9 @@ fun ShiftSummaryContent(
                 Modifier.padding(20.dp).fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                SummaryStat(st.totalRevenue,  settings.formatPrice(totalRevenue + totalTips), tc.accent)
-                SummaryStat(st.netProfit,     settings.formatPrice(netProfit),               tc.green)
-                SummaryStat(st.tipsLabel,     settings.formatPrice(totalTips),               tc.purple)
+                SummaryStat(st.totalRevenue, settings.formatPrice(totalRevenue + totalTips), tc.accent)
+                SummaryStat(st.expensesSection.replace("💸  ", ""), settings.formatPrice(totalExpenses), tc.red)
+                SummaryStat(st.netProfit, settings.formatPrice(netProfit), tc.green)
             }
         }
 

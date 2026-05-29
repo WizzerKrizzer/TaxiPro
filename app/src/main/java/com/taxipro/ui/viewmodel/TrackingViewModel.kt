@@ -2,10 +2,13 @@ package com.taxipro.ui.viewmodel
 
 import android.app.Application
 import android.content.*
+import android.content.pm.PackageManager
 import android.location.Geocoder
 import androidx.lifecycle.*
 import com.taxipro.data.db.*
 import com.taxipro.data.db.Tariff
+import com.taxipro.data.network.DirectionsApi
+import com.taxipro.data.network.GoogleMapsRequestCache
 import com.taxipro.service.GpsTrackingService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -296,7 +299,12 @@ class TrackingViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(fareAdjustment = 0.0) }
     }
 
-    fun stopAndSaveRide(tip: Double = 0.0, currency: String = "BGN", paymentMethod: String = "CASH") {
+    fun stopAndSaveRide(
+        tip: Double = 0.0,
+        currency: String = "BGN",
+        paymentMethod: String = "CASH",
+        onSaved: () -> Unit = {},
+    ) {
         val s = _state.value
         sendAction(GpsTrackingService.ACTION_STOP)
 
@@ -376,6 +384,7 @@ class TrackingViewModel(app: Application) : AndroidViewModel(app) {
                 paymentMethod   = paymentMethod,
             )
             dao.insertRide(ride)
+            onSaved()
         }
 
         _state.update { it.copy(
@@ -463,7 +472,7 @@ class TrackingViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun reverseGeocode(lat: Double, lng: Double): String {
         if (lat == 0.0 && lng == 0.0) return ""
         return withContext(Dispatchers.IO) {
-            try {
+            val localAddress = try {
                 val geocoder = Geocoder(getApplication(), Locale.getDefault())
                 val results  = geocoder.getFromLocation(lat, lng, 1)
                 if (!results.isNullOrEmpty()) {
@@ -474,8 +483,47 @@ class TrackingViewModel(app: Application) : AndroidViewModel(app) {
                     }.ifEmpty { a.getAddressLine(0) ?: "" }
                 } else ""
             } catch (_: Exception) { "" }
+
+            localAddress.ifBlank {
+                reverseGeocodeWithGoogle(lat, lng)
+            }
         }
     }
+
+    private suspend fun reverseGeocodeWithGoogle(lat: Double, lng: Double): String {
+        val apiKey = getGoogleMapsApiKey()
+        if (apiKey.isBlank()) return ""
+
+        return try {
+            val app = getApplication<Application>()
+            GoogleMapsRequestCache.cachedReverseGeocode(
+                context = app,
+                api = DirectionsApi.create(),
+                lat = lat,
+                lng = lng,
+                apiKey = apiKey,
+                language = Locale.getDefault().language.ifBlank { "bg" },
+            )
+                .results
+                .firstOrNull()
+                ?.formatted_address
+                .orEmpty()
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
+    private fun getGoogleMapsApiKey(): String =
+        try {
+            val app = getApplication<Application>()
+            val ai = app.packageManager.getApplicationInfo(
+                app.packageName,
+                PackageManager.GET_META_DATA,
+            )
+            ai.metaData?.getString("com.google.android.geo.API_KEY").orEmpty()
+        } catch (_: Exception) {
+            ""
+        }
 
     fun saveCalculatedRide(
         km: Double, waitMin: Double, price: Double,
@@ -485,11 +533,13 @@ class TrackingViewModel(app: Application) : AndroidViewModel(app) {
         routePointsJson: String = "[]",
         tip: Double = 0.0,
         fareAdjustment: Double = 0.0,
+        startTimeMs: Long = System.currentTimeMillis(),
+        endTimeMs: Long = startTimeMs,
+        onSaved: () -> Unit = {},
     ) {
         viewModelScope.launch {
             val dao = db.rideDao()
-            val now = System.currentTimeMillis()
-            val day = startOfDay(now)
+            val day = startOfDay(startTimeMs)
 
             // Detect internal ride (start and end in the same zone)
             val zones      = db.zoneDao().getAllZonesOnce()
@@ -501,12 +551,12 @@ class TrackingViewModel(app: Application) : AndroidViewModel(app) {
             val ride = Ride(
                 globalId        = dao.getTotalCount() + 1,
                 dailyId         = dao.getDailyCount(day, day + 86_400_000L) + 1,
-                weeklyId        = dao.getWeeklyCount(startOfWeek(now), startOfWeek(now) + 604_800_000L) + 1,
-                monthlyId       = dao.getMonthlyCount(startOfMonth(now), nextMonth(startOfMonth(now))) + 1,
-                yearlyId        = dao.getYearlyCount(startOfYear(now),  nextYear(startOfYear(now)))  + 1,
+                weeklyId        = dao.getWeeklyCount(startOfWeek(startTimeMs), startOfWeek(startTimeMs) + 604_800_000L) + 1,
+                monthlyId       = dao.getMonthlyCount(startOfMonth(startTimeMs), nextMonth(startOfMonth(startTimeMs))) + 1,
+                yearlyId        = dao.getYearlyCount(startOfYear(startTimeMs),  nextYear(startOfYear(startTimeMs)))  + 1,
                 date            = day,
-                startTime       = now,
-                endTime         = now,
+                startTime       = startTimeMs,
+                endTime         = endTimeMs.coerceAtLeast(startTimeMs),
                 fromAddress     = fromAddress,
                 toAddress       = toAddress,
                 fromLat         = fromLat,
@@ -527,6 +577,7 @@ class TrackingViewModel(app: Application) : AndroidViewModel(app) {
                 fuelCostPerKm   = currentSettings.fuelCostPerKm,
             )
             dao.insertRide(ride)
+            onSaved()
         }
     }
 }

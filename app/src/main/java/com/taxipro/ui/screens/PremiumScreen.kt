@@ -23,6 +23,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.taxipro.data.billing.BillingManager
+import com.taxipro.data.billing.DEBUG_PLAN_SWITCH_ENABLED
 import com.taxipro.data.billing.PlanType
 import com.taxipro.ui.theme.LocalStrings
 import com.taxipro.ui.viewmodel.PremiumViewModel
@@ -42,6 +43,7 @@ fun PremiumScreen(premiumVm: PremiumViewModel) {
     val detMonthly   by premiumVm.detailsMonthly.collectAsState()
     val detYearly    by premiumVm.detailsYearly.collectAsState()
     val detLifetime  by premiumVm.detailsLifetime.collectAsState()
+    val debugOverride by premiumVm.debugPlanOverride.collectAsState(initial = null)
 
     val isLoading = purchState is BillingManager.PurchaseUiState.Loading
 
@@ -131,6 +133,20 @@ fun PremiumScreen(premiumVm: PremiumViewModel) {
         }
 
         Spacer(Modifier.height(20.dp))
+
+        if (!isPremium) {
+            AdCreditsBalanceCard()
+            Spacer(Modifier.height(16.dp))
+        }
+
+        if (DEBUG_PLAN_SWITCH_ENABLED) {
+            DebugPlanSwitchCard(
+                currentOverride = debugOverride,
+                isPremium = isPremium,
+                onSetOverride = { premiumVm.setDebugPlanOverride(it) },
+            )
+            Spacer(Modifier.height(16.dp))
+        }
 
         // ── Plan selector ─────────────────────────────────────────────────────
         if (!isPremium) {
@@ -278,6 +294,133 @@ fun PremiumScreen(premiumVm: PremiumViewModel) {
 }
 
 // ── Plan card ─────────────────────────────────────────────────────────────────
+@Composable
+private fun AdCreditsBalanceCard() {
+    val tc = LocalThemeColors.current
+    val creditsState = LocalAdCreditsState.current
+    val config = creditsState.config
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+        colors = CardDefaults.cardColors(containerColor = tc.card),
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, tc.accent.copy(alpha = 0.25f)),
+    ) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .background(tc.accent.copy(alpha = 0.14f), CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Default.Toll, null, tint = tc.accent, modifier = Modifier.size(24.dp))
+                }
+                Column(Modifier.weight(1f)) {
+                    Text("Ad credits", color = tc.muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "${creditsState.credits} credits",
+                        color = tc.textPrimary,
+                        fontSize = 26.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                    )
+                }
+                Text(
+                    "+${config.rewardedCredits} per ad",
+                    color = tc.accent,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+
+            HorizontalDivider(color = tc.surface)
+
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                CreditPriceChip("Ride", config.rideCreditCost, Modifier.weight(1f))
+                CreditPriceChip("Calc", config.calculatorCreditCost, Modifier.weight(1f))
+                CreditPriceChip("Zone", config.zoneSlotCreditCost, Modifier.weight(1f))
+            }
+        }
+    }
+}
+
+@Composable
+private fun CreditPriceChip(label: String, cost: Int, modifier: Modifier = Modifier) {
+    val tc = LocalThemeColors.current
+    Column(
+        modifier = modifier
+            .background(tc.surface.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
+            .padding(vertical = 10.dp, horizontal = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(label, color = tc.muted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        Text("$cost", color = tc.textPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+private fun DebugPlanSwitchCard(
+    currentOverride: String?,
+    isPremium: Boolean,
+    onSetOverride: (String?) -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+        colors = CardDefaults.cardColors(containerColor = tc.card),
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(1.dp, tc.accent.copy(alpha = 0.35f)),
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(Icons.Default.BugReport, null, tint = tc.accent, modifier = Modifier.size(20.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Testing plan switch", color = tc.textPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Text(
+                        "Current: ${if (isPremium) "Premium" else "Free"}" +
+                            (currentOverride?.let { " ($it override)" } ?: " (real billing state)"),
+                        color = tc.muted,
+                        fontSize = 11.sp,
+                    )
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                DebugPlanButton("Free", currentOverride == "free", Modifier.weight(1f)) {
+                    onSetOverride("free")
+                }
+                DebugPlanButton("Premium", currentOverride == "premium", Modifier.weight(1f)) {
+                    onSetOverride("premium")
+                }
+                DebugPlanButton("Real", currentOverride == null, Modifier.weight(1f)) {
+                    onSetOverride(null)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DebugPlanButton(
+    label: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier,
+        shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(1.dp, if (selected) tc.accent else tc.muted.copy(alpha = 0.35f)),
+        colors = ButtonDefaults.outlinedButtonColors(
+            containerColor = if (selected) tc.accent.copy(alpha = 0.16f) else Color.Transparent,
+            contentColor = if (selected) tc.accent else tc.muted,
+        ),
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+    ) {
+        Text(label, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+    }
+}
+
 @Composable
 private fun PlanCard(
     selected   : Boolean,

@@ -20,6 +20,7 @@ data class DirectionRoute(
 data class DirectionLeg(
     val distance: ValueText = ValueText(),
     val duration: ValueText = ValueText(),
+    val duration_in_traffic: ValueText? = null,
     val start_address: String = "",
     val end_address: String = "",
     val start_location: LatLngLiteral = LatLngLiteral(),
@@ -58,9 +59,11 @@ interface DirectionsApi {
     suspend fun getDirections(
         @Query("origin") origin: String,
         @Query("destination") destination: String,
-        @Query("alternatives") alternatives: Boolean = true,
+        @Query("alternatives") alternatives: Boolean = false,
         @Query("key") apiKey: String,
         @Query("language") language: String = "bg",
+        @Query("departure_time") departureTime: Long? = null,
+        @Query("traffic_model") trafficModel: String? = null,
     ): DirectionsResponse
 
     @GET("place/autocomplete/json")

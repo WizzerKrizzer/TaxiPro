@@ -344,7 +344,7 @@ fun AdvancedSettingsScreen(
                         }
                     }
                     LazyColumn(Modifier.heightIn(max = 360.dp)) {
-                        items(filtered) { cur ->
+                        items(items = filtered, key = { it.code }) { cur ->
                             val selected = cur == draft.currency
                             Row(
                                 Modifier

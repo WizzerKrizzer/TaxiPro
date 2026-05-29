@@ -29,6 +29,7 @@ import com.taxipro.data.db.ExpenseFrequency
 import com.taxipro.data.db.ExpenseType
 import com.taxipro.data.db.freq
 import com.taxipro.data.db.expType
+import com.taxipro.data.ads.CreditFeature
 import com.taxipro.ui.viewmodel.RideViewModel
 import com.taxipro.ui.viewmodel.TrackingViewModel
 import com.taxipro.ui.viewmodel.TrackingState
@@ -45,14 +46,26 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
     var showStop by remember { mutableStateOf(false) }
     var showNoShiftDialog by remember { mutableStateOf(false) }
     var showEndShiftDialog by remember { mutableStateOf(false) }
+    var showRideLimitDialog by remember { mutableStateOf(false) }
     var pendingStart by remember { mutableStateOf<(() -> Unit)?>(null) }
     var tipInput by remember { mutableStateOf("0") }
     var paymentMethod by remember { mutableStateOf("CASH") } // CASH / CARD
+    val onUpgrade = LocalOnUpgrade.current
+    val adActions = LocalAdActions.current
+    val creditsState = LocalAdCreditsState.current
+    val activity = androidx.compose.ui.platform.LocalContext.current.findActivity()
 
     // Тарифа
     val tariffs        by vm.tariffs.collectAsState()
-    val currentHour    = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+    var currentMinuteOfDay by remember { mutableIntStateOf(currentMinuteOfDay()) }
     var selectedTariff by remember { mutableStateOf<Tariff?>(null) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            currentMinuteOfDay = currentMinuteOfDay()
+            delay(15_000L)
+        }
+    }
 
     // Статистики за Profit Preview
     val allRides    by rideVm.allRides.collectAsState(initial = emptyList())
@@ -60,11 +73,14 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
     val allExpenses by vm.allExpenses.collectAsState()
 
     // Авто-избор на тарифа при зареждане
-    LaunchedEffect(tariffs) {
-        if (selectedTariff == null && tariffs.isNotEmpty()) {
-            selectedTariff = tariffs.firstOrNull { t ->
-                t.autoEnabled && tariffInHourRange(currentHour, t.autoStartHour, t.autoEndHour)
-            } ?: tariffs.first()
+    LaunchedEffect(tariffs, currentMinuteOfDay, state.isTracking) {
+        if (!state.isTracking && tariffs.isNotEmpty()) {
+            val autoTariff = tariffs.firstOrNull { t ->
+                t.autoEnabled && tariffInMinuteRange(currentMinuteOfDay, t.autoStartMinuteOfDay(), t.autoEndMinuteOfDay())
+            }
+            selectedTariff = autoTariff
+                ?: selectedTariff?.takeIf { selected -> tariffs.any { it.id == selected.id } }
+                ?: tariffs.first()
         }
     }
 
@@ -156,7 +172,7 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
         // ── Тарифа избор ──
         if (!state.isTracking) {
             if (tariffs.isNotEmpty()) {
-                TariffSelectorBar(tariffs, selectedTariff, currentHour) { selectedTariff = it }
+                TariffSelectorBar(tariffs, selectedTariff, currentMinuteOfDay) { selectedTariff = it }
             }
         }
 
@@ -181,7 +197,7 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 SpeedCard2(displaySpeed, settings, Modifier.weight(1f).fillMaxHeight())
-                WaitCard2(displayWaitSec, Modifier.weight(1f).fillMaxHeight())
+                RideDurationCard2(displayElapsed, Modifier.weight(1f).fillMaxHeight())
             }
 
             // КМ + Времетраене
@@ -234,11 +250,17 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
         when {
             !state.isTracking -> {
                 GpsStartButton {
+                    val startWithAccessCheck = {
+                        adActions.consumeRide { allowed ->
+                            if (allowed) vm.startRide(selectedTariff)
+                            else showRideLimitDialog = true
+                        }
+                    }
                     if (activeShift == null) {
-                        pendingStart = { vm.startRide(selectedTariff) }
+                        pendingStart = startWithAccessCheck
                         showNoShiftDialog = true
                     } else {
-                        vm.startRide(selectedTariff)
+                        startWithAccessCheck()
                     }
                 }
 
@@ -446,7 +468,11 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
             confirmButton = {
                 Button(
                     onClick = {
-                        vm.stopAndSaveRide(tipInput.toDoubleOrNull() ?: 0.0, paymentMethod = paymentMethod)
+                        vm.stopAndSaveRide(
+                            tip = tipInput.toDoubleOrNull() ?: 0.0,
+                            paymentMethod = paymentMethod,
+                            onSaved = { activity?.let { adActions.recordCompletedRide(it) } },
+                        )
                         showStop = false; tipInput = "0"; paymentMethod = "CASH"
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = tc.green)
@@ -458,6 +484,28 @@ fun ActiveRideScreen(vm: TrackingViewModel, rideVm: RideViewModel) {
                     if (!wasPaused) vm.resumeRide()
                 }) { Text(st.cancelBtn, color = tc.muted) }
             }
+        )
+    }
+
+    if (showRideLimitDialog) {
+        CreditLimitDialog(
+            feature = CreditFeature.Ride,
+            title = "Daily ride limit reached",
+            message = "The free plan includes ${creditsState.config.dailyFreeRides} rides per day. Use credits, watch an ad, or upgrade to Premium to start another ride.",
+            onUseCredits = {
+                adActions.consumeRide { allowed ->
+                    if (allowed) {
+                        showRideLimitDialog = false
+                        vm.startRide(selectedTariff)
+                    }
+                }
+            },
+            onWatchAd = { activity?.let { adActions.watchRewarded(it) } },
+            onUpgrade = {
+                showRideLimitDialog = false
+                onUpgrade()
+            },
+            onDismiss = { showRideLimitDialog = false },
         )
     }
 }
@@ -696,6 +744,29 @@ fun WaitCard2(waitSeconds: Double, modifier: Modifier) {
     }
 }
 
+@Composable
+fun RideDurationCard2(elapsedSeconds: Long, modifier: Modifier) {
+    val tc       = LocalThemeColors.current
+    val st       = LocalStrings.current
+    val totalSec = elapsedSeconds.coerceAtLeast(0L)
+    val h        = totalSec / 3600
+    val m        = (totalSec % 3600) / 60
+    val s        = totalSec % 60
+    val display  = "%02d:%02d:%02d".format(h, m, s)
+    Card(modifier = modifier, colors = CardDefaults.cardColors(containerColor = tc.card),
+        shape = RoundedCornerShape(12.dp)) {
+        Column(
+            Modifier.padding(14.dp).fillMaxHeight(),
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(st.durationField, color = tc.muted, fontSize = 10.sp, letterSpacing = 1.sp)
+            Text(display, color = tc.blue,
+                fontSize = 24.sp, fontWeight = FontWeight.Black, fontFamily = FontFamily.Monospace)
+            Text("hh:mm:ss", color = tc.muted, fontSize = 11.sp)
+        }
+    }
+}
+
 // Точка 2 — Скорост с правилна мерна единица
 @Composable
 fun SpeedCard2(speedKmh: Double, settings: AppSettings, modifier: Modifier) {
@@ -799,15 +870,35 @@ fun TimerCard(seconds: Long, modifier: Modifier) {
 
 // ── Tariff Selector ─────────────────────────────────────────────
 
-fun tariffInHourRange(hour: Int, start: Int, end: Int): Boolean =
-    if (start > end) hour >= start || hour < end
-    else hour >= start && hour < end
+private const val MINUTES_PER_DAY = 24 * 60
+
+fun currentMinuteOfDay(): Int {
+    val calendar = Calendar.getInstance()
+    return calendar.get(Calendar.HOUR_OF_DAY) * 60 + calendar.get(Calendar.MINUTE)
+}
+
+fun Tariff.autoStartMinuteOfDay(): Int =
+    (autoStartHour.coerceIn(0, 23) * 60 + autoStartMinute.coerceIn(0, 59)).coerceIn(0, MINUTES_PER_DAY - 1)
+
+fun Tariff.autoEndMinuteOfDay(): Int =
+    (autoEndHour.coerceIn(0, 23) * 60 + autoEndMinute.coerceIn(0, 59)).coerceIn(0, MINUTES_PER_DAY - 1)
+
+fun formatAutoTime(minuteOfDay: Int): String {
+    val minute = minuteOfDay.floorMod(MINUTES_PER_DAY)
+    return "%02d:%02d".format(minute / 60, minute % 60)
+}
+
+fun tariffInMinuteRange(current: Int, start: Int, end: Int): Boolean =
+    if (start > end) current >= start || current <= end
+    else current >= start && current <= end
+
+private fun Int.floorMod(mod: Int): Int = ((this % mod) + mod) % mod
 
 @Composable
 fun TariffSelectorBar(
     tariffs: List<Tariff>,
     selected: Tariff?,
-    currentHour: Int,
+    currentMinuteOfDay: Int,
     onSelect: (Tariff?) -> Unit,
 ) {
     val tc = LocalThemeColors.current
@@ -827,7 +918,7 @@ fun TariffSelectorBar(
             ) {
                 tariffs.forEach { t ->
                     val isAutoActive = t.autoEnabled &&
-                        tariffInHourRange(currentHour, t.autoStartHour, t.autoEndHour)
+                        tariffInMinuteRange(currentMinuteOfDay, t.autoStartMinuteOfDay(), t.autoEndMinuteOfDay())
                     val isSel = selected?.id == t.id
                     Button(
                         onClick  = { onSelect(t) },

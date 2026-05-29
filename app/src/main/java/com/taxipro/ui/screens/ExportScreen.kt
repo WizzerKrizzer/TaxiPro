@@ -32,6 +32,48 @@ fun ExportScreen() {
     val st       = LocalStrings.current
     val settings = LocalSettings.current
     val ctx      = LocalContext.current
+    val isPremium = LocalIsPremium.current
+    val onUpgrade = LocalOnUpgrade.current
+
+    if (!isPremium) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(tc.background)
+                .padding(24.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = tc.card),
+                shape = RoundedCornerShape(18.dp),
+                border = BorderStroke(1.dp, Color(0xFFFFBF00).copy(alpha = 0.35f)),
+            ) {
+                Column(
+                    Modifier.padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Icon(Icons.Default.Lock, null, tint = Color(0xFFFFBF00), modifier = Modifier.size(42.dp))
+                    Text(st.premium.gateTitle, color = Color(0xFFFFBF00), fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        "Export and Import are available only with Premium.",
+                        color = tc.muted,
+                        fontSize = 13.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    )
+                    Button(
+                        onClick = onUpgrade,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFBF00)),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(st.premium.gateBtn, color = Color(0xFF1A1200), fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+        return
+    }
 
     // ── File picker for restore ───────────────────────────────────
     var showRestoreDialog by remember { mutableStateOf(false) }

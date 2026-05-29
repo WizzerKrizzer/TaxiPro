@@ -26,9 +26,11 @@ import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.LatLngBounds
 import com.google.maps.android.compose.*
+import com.taxipro.data.ads.CreditFeature
 import com.taxipro.data.db.*
 import com.taxipro.data.network.DirectionsApi
 import com.taxipro.data.network.DirectionRoute
+import com.taxipro.data.network.GoogleMapsRequestCache
 import com.taxipro.data.network.decodePolyline
 import com.taxipro.ui.theme.LocalSettings
 import com.taxipro.ui.theme.LocalStrings
@@ -36,6 +38,10 @@ import com.taxipro.ui.viewmodel.TrackingViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 import kotlin.coroutines.resume
 
 // ── Route colors (one per alternative) ──────────────────────
@@ -63,6 +69,7 @@ private data class RouteResult(
     val toLng: Double,
     val routePointsJson: String,
     val decodedPoints: List<LatLng>,
+    val usedTrafficDuration: Boolean,
 )
 
 @Composable
@@ -73,6 +80,11 @@ fun RouteCalculatorScreen(vm: TrackingViewModel, settingsRepo: SettingsRepositor
     val st       = LocalStrings.current
     val settings = LocalSettings.current
     val tariffs  by vm.tariffs.collectAsState()
+    val onUpgrade = LocalOnUpgrade.current
+    val isPremium = LocalIsPremium.current
+    val adActions = LocalAdActions.current
+    val creditsState = LocalAdCreditsState.current
+    val activity = context.findActivity()
 
     var fromText  by remember { mutableStateOf("") }
     var toText    by remember { mutableStateOf("") }
@@ -80,6 +92,15 @@ fun RouteCalculatorScreen(vm: TrackingViewModel, settingsRepo: SettingsRepositor
     var errorMsg  by remember { mutableStateOf<String?>(null) }
     var routes    by remember { mutableStateOf<List<RouteResult>>(emptyList()) }
     var savedIdx  by remember { mutableStateOf<Set<Int>>(emptySet()) }
+    val initialRideTime = remember { Calendar.getInstance() }
+    var rideHourText by remember {
+        mutableStateOf("%02d".format(initialRideTime.get(Calendar.HOUR_OF_DAY)))
+    }
+    var rideMinuteText by remember {
+        mutableStateOf("%02d".format(initialRideTime.get(Calendar.MINUTE)))
+    }
+    var showCalculatorLimitDialog by remember { mutableStateOf(false) }
+    var showRideLimitDialog by remember { mutableStateOf(false) }
 
     // Map pin picker: "from", "to", or null
     var showMapPicker by remember { mutableStateOf<String?>(null) }
@@ -88,9 +109,9 @@ fun RouteCalculatorScreen(vm: TrackingViewModel, settingsRepo: SettingsRepositor
     var selectedTariff by remember { mutableStateOf<Tariff?>(null) }
     LaunchedEffect(tariffs) {
         if (selectedTariff == null && tariffs.isNotEmpty()) {
-            val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+            val minuteOfDay = currentMinuteOfDay()
             selectedTariff = tariffs.firstOrNull { t ->
-                t.autoEnabled && tariffInHourRange(hour, t.autoStartHour, t.autoEndHour)
+                t.autoEnabled && tariffInMinuteRange(minuteOfDay, t.autoStartMinuteOfDay(), t.autoEndMinuteOfDay())
             }
         }
     }
@@ -110,6 +131,18 @@ fun RouteCalculatorScreen(vm: TrackingViewModel, settingsRepo: SettingsRepositor
     fun activePricePerKm()  = selectedTariff?.pricePerKm      ?: settings.pricePerKm
     fun activePricePerMin() = selectedTariff?.pricePerMinute  ?: settings.pricePerMinute
 
+    fun selectedRideStartMs(): Long? {
+        val hour = rideHourText.toIntOrNull()
+        val minute = rideMinuteText.toIntOrNull()
+        if (hour == null || minute == null || hour !in 0..23 || minute !in 0..59) return null
+        return Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, hour)
+            set(Calendar.MINUTE, minute)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+    }
+
     fun estimateWait(distKm: Double, durMin: Double): Double {
         // Estimate the time the vehicle is stopped/slow (taxi wait meter ticking).
         // Free-flow baseline at 60 km/h; anything above that is congestion time.
@@ -122,7 +155,8 @@ fun RouteCalculatorScreen(vm: TrackingViewModel, settingsRepo: SettingsRepositor
     fun buildRouteResult(route: DirectionRoute): RouteResult {
         val leg      = route.legs.first()
         val distKm   = leg.distance.value / 1000.0
-        val durMin   = leg.duration.value / 60.0
+        val trafficDuration = leg.duration_in_traffic?.value
+        val durMin   = (trafficDuration ?: leg.duration.value) / 60.0
         val waitMin  = estimateWait(distKm, durMin)
         val sf       = activeStartFee()
         val distCost = distKm * activePricePerKm()
@@ -149,19 +183,29 @@ fun RouteCalculatorScreen(vm: TrackingViewModel, settingsRepo: SettingsRepositor
             toLng            = leg.end_location.lng,
             routePointsJson  = json,
             decodedPoints    = latLngs,
+            usedTrafficDuration = trafficDuration != null,
         )
     }
 
-    fun doCalculate() {
-        if (fromText.isBlank() || toText.isBlank()) {
-            errorMsg = st.calc.enterFromTo
-            return
-        }
+    fun doCalculateCore() {
+        val rideStartMs = selectedRideStartMs() ?: return
         isLoading = true; errorMsg = null
         routes = emptyList(); savedIdx = emptySet()
         scope.launch {
             try {
-                val resp = api.getDirections(fromText.trim(), toText.trim(), apiKey = apiKey)
+                val now = System.currentTimeMillis()
+                val departureTimeSec = if (rideStartMs >= now - 60_000L) rideStartMs / 1000L else null
+                val resp = GoogleMapsRequestCache.cachedDirections(
+                    context = context,
+                    api = api,
+                    origin = fromText.trim(),
+                    destination = toText.trim(),
+                    alternatives = isPremium,
+                    apiKey = apiKey,
+                    language = apiLangForSettings(settings),
+                    departureTime = departureTimeSec,
+                    trafficModel = if (departureTimeSec != null) "best_guess" else null,
+                )
                 if (resp.status != "OK" || resp.routes.isEmpty()) {
                     errorMsg = when (resp.status) {
                         "ZERO_RESULTS"   -> st.calc.noRouteFound
@@ -170,13 +214,29 @@ fun RouteCalculatorScreen(vm: TrackingViewModel, settingsRepo: SettingsRepositor
                         else             -> "Error: ${resp.status}"
                     }
                 } else {
-                    routes = resp.routes.take(3).map { buildRouteResult(it) }
+                    routes = resp.routes.take(if (isPremium) 3 else 1).map { buildRouteResult(it) }
                 }
             } catch (e: Exception) {
                 errorMsg = "${st.calc.networkError} ${e.localizedMessage}"
             } finally {
                 isLoading = false
             }
+        }
+    }
+
+    fun doCalculate() {
+        if (fromText.isBlank() || toText.isBlank()) {
+            errorMsg = st.calc.enterFromTo
+            return
+        }
+        val rideStartMs = selectedRideStartMs()
+        if (rideStartMs == null) {
+            errorMsg = "Invalid start time"
+            return
+        }
+        adActions.consumeCalculator { allowed ->
+            if (allowed) doCalculateCore()
+            else showCalculatorLimitDialog = true
         }
     }
 
@@ -261,6 +321,14 @@ fun RouteCalculatorScreen(vm: TrackingViewModel, settingsRepo: SettingsRepositor
         )
         Spacer(Modifier.height(14.dp))
 
+        RideStartTimeCard(
+            hourText = rideHourText,
+            minuteText = rideMinuteText,
+            onHourChange = { rideHourText = it.filter(Char::isDigit).take(2) },
+            onMinuteChange = { rideMinuteText = it.filter(Char::isDigit).take(2) },
+        )
+        Spacer(Modifier.height(14.dp))
+
         // Calculate
         Button(
             onClick  = { doCalculate() },
@@ -328,17 +396,29 @@ fun RouteCalculatorScreen(vm: TrackingViewModel, settingsRepo: SettingsRepositor
                     route    = route,
                     settings = settings,
                     isSaved  = idx in savedIdx,
+                    startTimeMs = selectedRideStartMs() ?: System.currentTimeMillis(),
                     onSave   = { fareAdj, tip ->
-                        scope.launch {
-                            vm.saveCalculatedRide(
-                                km = route.distanceKm, waitMin = route.estimatedWaitMin,
-                                price = route.fare, fromAddress = route.fromAddress,
-                                toAddress = route.toAddress, fromLat = route.fromLat,
-                                fromLng = route.fromLng, toLat = route.toLat,
-                                toLng = route.toLng, routePointsJson = route.routePointsJson,
-                                tip = tip, fareAdjustment = fareAdj,
-                            )
-                            savedIdx = savedIdx + idx
+                        adActions.consumeRide { allowed ->
+                            if (!allowed) {
+                                showRideLimitDialog = true
+                                return@consumeRide
+                            }
+                            scope.launch {
+                                val startMs = selectedRideStartMs() ?: System.currentTimeMillis()
+                                val endMs = startMs + (route.durationMin * 60_000).toLong()
+                                vm.saveCalculatedRide(
+                                    km = route.distanceKm, waitMin = route.estimatedWaitMin,
+                                    price = route.fare, fromAddress = route.fromAddress,
+                                    toAddress = route.toAddress, fromLat = route.fromLat,
+                                    fromLng = route.fromLng, toLat = route.toLat,
+                                    toLng = route.toLng, routePointsJson = route.routePointsJson,
+                                    tip = tip, fareAdjustment = fareAdj,
+                                    startTimeMs = startMs,
+                                    endTimeMs = endMs,
+                                    onSaved = { activity?.let { adActions.recordCompletedRide(it) } },
+                                )
+                                savedIdx = savedIdx + idx
+                            }
                         }
                     }
                 )
@@ -362,7 +442,47 @@ fun RouteCalculatorScreen(vm: TrackingViewModel, settingsRepo: SettingsRepositor
             }
         )
     }
+
+    if (showCalculatorLimitDialog) {
+        CreditLimitDialog(
+            feature = CreditFeature.Calculator,
+            title = "Route calculator limit reached",
+            message = "The free plan includes ${creditsState.config.dailyFreeCalculator} route calculation per day. Use ${creditsState.config.calculatorCreditCost} credits, watch an ad, or upgrade to Premium.",
+            onUseCredits = {
+                adActions.consumeCalculator { allowed ->
+                    if (allowed) {
+                        showCalculatorLimitDialog = false
+                        doCalculateCore()
+                    }
+                }
+            },
+            onWatchAd = { activity?.let { adActions.watchRewarded(it) } },
+            onUpgrade = {
+                showCalculatorLimitDialog = false
+                onUpgrade()
+            },
+            onDismiss = { showCalculatorLimitDialog = false },
+        )
+    }
+
+    if (showRideLimitDialog) {
+        CreditLimitDialog(
+            feature = CreditFeature.Ride,
+            title = "Daily ride limit reached",
+            message = "The free plan includes ${creditsState.config.dailyFreeRides} rides per day. Use credits, watch an ad, or upgrade to Premium before saving another ride.",
+            onUseCredits = null,
+            onWatchAd = { activity?.let { adActions.watchRewarded(it) } },
+            onUpgrade = {
+                showRideLimitDialog = false
+                onUpgrade()
+            },
+            onDismiss = { showRideLimitDialog = false },
+        )
+    }
 }
+
+internal fun apiLangForSettings(settings: AppSettings): String =
+    if (settings.language.code == "bg") "bg" else "en"
 
 // ── Map pin picker dialog ────────────────────────────────────
 @SuppressLint("MissingPermission")
@@ -373,6 +493,8 @@ internal fun MapPinPickerDialog(
     apiKey: String,
     onDismiss: () -> Unit,
     onConfirm: (address: String) -> Unit,
+    originalStart: LatLng? = null,
+    originalEnd: LatLng? = null,
 ) {
     val tc      = LocalThemeColors.current
     val st      = LocalStrings.current
@@ -387,6 +509,9 @@ internal fun MapPinPickerDialog(
 
     val cameraState = rememberCameraPositionState {
         position = CameraPosition.fromLatLngZoom(LatLng(42.698, 23.322), 12f)
+    }
+    val originalPoints = remember(originalStart, originalEnd) {
+        listOfNotNull(originalStart, originalEnd)
     }
 
     // Move camera to real current location when dialog opens
@@ -420,6 +545,16 @@ internal fun MapPinPickerDialog(
                     CameraUpdateFactory.newLatLngZoom(LatLng(it.latitude, it.longitude), 15f)
                 )
             }
+            if (originalPoints.size >= 2) {
+                val bounds = LatLngBounds.Builder().also { b ->
+                    originalPoints.forEach { b.include(it) }
+                }.build()
+                cameraState.animate(CameraUpdateFactory.newLatLngBounds(bounds, 90))
+            } else {
+                originalPoints.firstOrNull()?.let {
+                    cameraState.animate(CameraUpdateFactory.newLatLngZoom(it, 15f))
+                }
+            }
         } catch (_: Exception) { }
     }
 
@@ -443,19 +578,6 @@ internal fun MapPinPickerDialog(
                     selectedAddress = null
                     isGeocoding     = true
                     scope.launch {
-                        try {
-                            // Try Google Geocoding API first
-                            if (apiKey.isNotBlank()) {
-                                val resp = api.reverseGeocode(
-                                    latLng   = "${latLng.latitude},${latLng.longitude}",
-                                    apiKey   = apiKey,
-                                    language = apiLang,
-                                )
-                                selectedAddress = resp.results.firstOrNull()?.formatted_address
-                            }
-                        } catch (_: Exception) { }
-
-                        // Fallback: Android Geocoder
                         if (selectedAddress == null) {
                             try {
                                 @Suppress("DEPRECATION")
@@ -464,10 +586,39 @@ internal fun MapPinPickerDialog(
                                 selectedAddress = addrs?.firstOrNull()?.getAddressLine(0)
                             } catch (_: Exception) { }
                         }
+                        if (selectedAddress == null && apiKey.isNotBlank()) {
+                            try {
+                                val resp = GoogleMapsRequestCache.cachedReverseGeocode(
+                                    context = context,
+                                    api = api,
+                                    lat = latLng.latitude,
+                                    lng = latLng.longitude,
+                                    apiKey = apiKey,
+                                    language = apiLang,
+                                )
+                                selectedAddress = resp.results.firstOrNull()?.formatted_address
+                            } catch (_: Exception) { }
+                        }
                         isGeocoding = false
                     }
                 }
             ) {
+                originalStart?.let { pt ->
+                    Marker(
+                        state = MarkerState(position = pt),
+                        title = st.calc.fromPointLabel,
+                        icon = createLabeledMarker(android.graphics.Color.parseColor("#9E9E9E"), "S"),
+                        zIndex = 1f,
+                    )
+                }
+                originalEnd?.let { pt ->
+                    Marker(
+                        state = MarkerState(position = pt),
+                        title = st.calc.toPointLabel,
+                        icon = createLabeledMarker(android.graphics.Color.parseColor("#BDBDBD"), "E"),
+                        zIndex = 1f,
+                    )
+                }
                 selectedLatLng?.let { pt ->
                     Marker(
                         state  = MarkerState(position = pt),
@@ -608,56 +759,33 @@ internal fun AddressInputField(
             skipAutocomplete = false
             return@LaunchedEffect
         }
-        if (value.length < 3) {
+        if (value.length < 4) {
             suggestions = emptyList()
             showDropdown = false
             return@LaunchedEffect
         }
-        delay(350)
+        delay(700)
 
         var fetched = false
 
         // Try Google Places Autocomplete
         if (apiKey.isNotBlank()) {
-            // Pass 1: strict local results only (within 30 km of the user).
-            // strictbounds=true forces the API to return ONLY results in the radius,
-            // so nearby cities always rank before distant ones with the same street name.
-            if (userLatLng != null) {
-                try {
-                    val resp = api.autocomplete(
-                        input        = value,
-                        apiKey       = apiKey,
-                        language     = apiLang,
-                        location     = userLatLng,
-                        radius       = 30_000,
-                        strictbounds = true,
-                    )
-                    if (resp.predictions.isNotEmpty()) {
-                        suggestions  = resp.predictions.map { it.description }
-                        showDropdown = true
-                        fetched = true
-                    }
-                } catch (_: Exception) { }
-            }
-
-            // Pass 2: if nothing found locally (e.g. user is searching in another city),
-            // fall back to a wider soft-biased search with no strict restriction.
-            if (!fetched) {
-                try {
-                    val resp = api.autocomplete(
-                        input    = value,
-                        apiKey   = apiKey,
-                        language = apiLang,
-                        location = userLatLng,
-                        radius   = if (userLatLng != null) 50_000 else null,
-                    )
-                    if (resp.predictions.isNotEmpty()) {
-                        suggestions  = resp.predictions.map { it.description }
-                        showDropdown = true
-                        fetched = true
-                    }
-                } catch (_: Exception) { }
-            }
+            try {
+                val resp = GoogleMapsRequestCache.cachedAutocomplete(
+                    context = context,
+                    api = api,
+                    input = value,
+                    apiKey = apiKey,
+                    language = apiLang,
+                    location = userLatLng,
+                    radius = if (userLatLng != null) 50_000 else null,
+                )
+                if (resp.predictions.isNotEmpty()) {
+                    suggestions  = resp.predictions.map { it.description }
+                    showDropdown = true
+                    fetched = true
+                }
+            } catch (_: Exception) { }
         }
 
         // Fallback: Android Geocoder
@@ -681,7 +809,7 @@ internal fun AddressInputField(
             onValueChange = {
                 skipAutocomplete = false   // user is typing manually — re-enable autocomplete
                 onValueChange(it)
-                if (it.length < 3) { suggestions = emptyList(); showDropdown = false }
+                if (it.length < 4) { suggestions = emptyList(); showDropdown = false }
             },
             label        = { Text(label) },
             leadingIcon  = { Icon(Icons.Default.Place, null, tint = accentColor) },
@@ -714,24 +842,26 @@ internal fun AddressInputField(
                                         }
                                         if (loc != null) {
                                             var addr: String? = null
-                                            // Try Google Geocoding
-                                            if (apiKey.isNotBlank()) {
-                                                try {
-                                                    val resp = api.reverseGeocode(
-                                                        latLng   = "${loc.latitude},${loc.longitude}",
-                                                        apiKey   = apiKey,
-                                                        language = apiLang,
-                                                    )
-                                                    addr = resp.results.firstOrNull()?.formatted_address
-                                                } catch (_: Exception) { }
-                                            }
-                                            // Fallback: Android Geocoder
+                                            // Try Android Geocoder first; Google is the paid fallback.
                                             if (addr == null) {
                                                 try {
                                                     @Suppress("DEPRECATION")
                                                     val addrs = android.location.Geocoder(context, java.util.Locale.getDefault())
                                                         .getFromLocation(loc.latitude, loc.longitude, 1)
                                                     addr = addrs?.firstOrNull()?.getAddressLine(0)
+                                                } catch (_: Exception) { }
+                                            }
+                                            if (addr == null && apiKey.isNotBlank()) {
+                                                try {
+                                                    val resp = GoogleMapsRequestCache.cachedReverseGeocode(
+                                                        context = context,
+                                                        api = api,
+                                                        lat = loc.latitude,
+                                                        lng = loc.longitude,
+                                                        apiKey = apiKey,
+                                                        language = apiLang,
+                                                    )
+                                                    addr = resp.results.firstOrNull()?.formatted_address
                                                 } catch (_: Exception) { }
                                             }
                                             if (addr != null) {
@@ -812,16 +942,90 @@ internal fun AddressInputField(
 
 // ── Route card ──────────────────────────────────────────────
 @Composable
+private fun RideStartTimeCard(
+    hourText: String,
+    minuteText: String,
+    onHourChange: (String) -> Unit,
+    onMinuteChange: (String) -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    val st = LocalStrings.current
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = tc.card),
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Schedule, null, tint = tc.accent, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "${st.fromLabel} ${st.calc.timeLabel.lowercase(Locale.getDefault())}",
+                    color = tc.textPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                OutlinedTextField(
+                    value = hourText,
+                    onValueChange = onHourChange,
+                    label = { Text("HH") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = tc.textPrimary,
+                        unfocusedTextColor = tc.textPrimary,
+                        cursorColor = tc.accent,
+                        focusedBorderColor = tc.accent,
+                        unfocusedBorderColor = tc.muted,
+                        focusedLabelColor = tc.accent,
+                        unfocusedLabelColor = tc.muted,
+                    )
+                )
+                Text(":", color = tc.muted, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                OutlinedTextField(
+                    value = minuteText,
+                    onValueChange = onMinuteChange,
+                    label = { Text("MM") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = tc.textPrimary,
+                        unfocusedTextColor = tc.textPrimary,
+                        cursorColor = tc.accent,
+                        focusedBorderColor = tc.accent,
+                        unfocusedBorderColor = tc.muted,
+                        focusedLabelColor = tc.accent,
+                        unfocusedLabelColor = tc.muted,
+                    )
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun RouteCard(
     index: Int,
     route: RouteResult,
     settings: AppSettings,
     isSaved: Boolean,
+    startTimeMs: Long,
     onSave: (fareAdj: Double, tip: Double) -> Unit,
 ) {
     val tc  = LocalThemeColors.current
     val st  = LocalStrings.current
     val sym = settings.currency.symbol
+    val timeFmt = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
+    val endTimeMs = startTimeMs + (route.durationMin * 60_000).toLong()
 
     var fareAdj by remember { mutableStateOf(0.0) }
     var tipText by remember { mutableStateOf("") }
@@ -853,6 +1057,21 @@ private fun RouteCard(
                 MetricCol(Icons.Default.Straighten,  st.distanceField, settings.formatDistance(route.distanceKm))
                 MetricCol(Icons.Default.Timer,        st.calc.timeLabel, fmtDuration(route.durationMin, st.calc.secAbbr, st.minAbbr))
                 MetricCol(Icons.Default.PauseCircle, st.waitTimeField,  fmtDuration(route.estimatedWaitMin, st.calc.secAbbr, st.minAbbr))
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("${st.fromLabel} ${timeFmt.format(Date(startTimeMs))}", color = tc.muted, fontSize = 12.sp)
+                Icon(Icons.Default.ArrowForward, null, tint = tc.muted, modifier = Modifier.size(16.dp))
+                Text(
+                    "${st.toLabel} ${timeFmt.format(Date(endTimeMs))}",
+                    color = tc.textPrimary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
             }
             Spacer(Modifier.height(12.dp))
 
@@ -1045,4 +1264,3 @@ private fun fmtDuration(minutes: Double, secAbbr: String, minAbbr: String): Stri
     val sec = (minutes * 60).toLong()
     return if (sec < 60) "$sec $secAbbr" else "%d:%02d $minAbbr".format(sec / 60, sec % 60)
 }
-

@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>TaxiPro</title>
+    <meta name="description" content="Developer website for TaxiPro, a taxi driver productivity app.">
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #101214;
+        --card: #181c20;
+        --text: #f5f2ea;
+        --muted: #b8b1a6;
+        --accent: #f6b900;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background:
+          radial-gradient(circle at top left, rgba(246, 185, 0, 0.2), transparent 32rem),
+          linear-gradient(135deg, #101214, #17110a 60%, #0d1115);
+        color: var(--text);
+        font-family: Georgia, "Times New Roman", serif;
+      }
+
+      main {
+        width: min(92vw, 720px);
+        padding: 44px;
+        border: 1px solid rgba(246, 185, 0, 0.3);
+        border-radius: 28px;
+        background: rgba(24, 28, 32, 0.88);
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.32);
+      }
+
+      .eyebrow {
+        margin: 0 0 12px;
+        color: var(--accent);
+        font: 700 13px/1.2 Arial, sans-serif;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(44px, 10vw, 92px);
+        line-height: 0.9;
+      }
+
+      p {
+        max-width: 56ch;
+        margin: 22px 0 0;
+        color: var(--muted);
+        font: 18px/1.65 Arial, sans-serif;
+      }
+
+      a {
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">Developer website</p>
+      <h1>TaxiPro</h1>
+      <p>
+        TaxiPro is a productivity app for taxi drivers, built to track rides,
+        shifts, route calculations, expenses, zones, and earnings.
+      </p>
+      <p>
+        Advertising authorization is available at
+        <a href="./app-ads.txt">app-ads.txt</a>.
+      </p>
+    </main>
+  </body>
+</html>

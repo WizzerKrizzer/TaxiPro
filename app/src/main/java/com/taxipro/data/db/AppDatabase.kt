@@ -5,7 +5,7 @@ import androidx.room.*
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [Ride::class, Tariff::class, Shift::class, TariffExpense::class, Zone::class, ZoneWaitSession::class, ShiftPauseSession::class], version = 17, exportSchema = false)
+@Database(entities = [Ride::class, Tariff::class, Shift::class, TariffExpense::class, Zone::class, ZoneWaitSession::class, ShiftPauseSession::class], version = 18, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun rideDao(): RideDao
     abstract fun tariffDao(): TariffDao
@@ -123,10 +123,17 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_17_18 = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tariffs ADD COLUMN autoStartMinute INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE tariffs ADD COLUMN autoEndMinute INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
                 Room.databaseBuilder(context, AppDatabase::class.java, "taxipro.db")
-                    .addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17)
+                    .addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18)
                     .fallbackToDestructiveMigration()
                     .build()
                     .also { INSTANCE = it }

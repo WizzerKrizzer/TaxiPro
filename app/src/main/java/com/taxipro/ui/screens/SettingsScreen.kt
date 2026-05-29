@@ -1,5 +1,6 @@
 package com.taxipro.ui.screens
 
+import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -17,11 +18,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.*
 import com.taxipro.data.db.*
+import com.taxipro.BuildConfig
 import com.taxipro.ui.theme.AppStrings
 import com.taxipro.ui.theme.LocalStrings
 import com.taxipro.ui.viewmodel.TrackingViewModel
 import kotlinx.coroutines.launch
-import java.util.Calendar
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -31,6 +32,10 @@ fun SettingsScreen(repo: SettingsRepository, vm: TrackingViewModel, onNavigate: 
     val tariffs       by vm.tariffs.collectAsState()
     val scope         = rememberCoroutineScope()
     val st            = LocalStrings.current
+    val adActions     = LocalAdActions.current
+    val adCredits     = LocalAdCreditsState.current
+    val context       = androidx.compose.ui.platform.LocalContext.current
+    val activity      = context.findActivity()
 
     var draft            by remember { mutableStateOf(AppSettings()) }
     var draftInitialized by remember { mutableStateOf(false) }
@@ -171,7 +176,7 @@ fun SettingsScreen(repo: SettingsRepository, vm: TrackingViewModel, onNavigate: 
                                 fontWeight = FontWeight.SemiBold)
                             Text(
                                 if (t.autoEnabled)
-                                    "${st.autoLabel}: %02d:00 – %02d:00".format(t.autoStartHour, t.autoEndHour)
+                                    "${st.autoLabel}: ${formatAutoTime(t.autoStartMinuteOfDay())} - ${formatAutoTime(t.autoEndMinuteOfDay())}"
                                 else st.manualLabel,
                                 color = tc.muted, fontSize = 11.sp
                             )
@@ -198,6 +203,55 @@ fun SettingsScreen(repo: SettingsRepository, vm: TrackingViewModel, onNavigate: 
                 Icon(Icons.Default.Add, null, tint = tc.accent)
                 Spacer(Modifier.width(6.dp))
                 Text(st.addTariff, color = tc.accent, fontWeight = FontWeight.Bold)
+            }
+        }
+
+        if (BuildConfig.DEBUG) {
+            // ── Ads debug ────────────────────────────────────────────────────
+            SectionCard("Ads debug") {
+                Text(
+                    "Remote Config: ${if (adCredits.config.firebaseReady) "connected" else "local defaults"}",
+                    color = tc.muted,
+                    fontSize = 12.sp,
+                )
+                Text(
+                    "Ad IDs: ${if (adCredits.config.useTestAdIds) "test" else "real"} • Credits reward: ${adCredits.config.rewardedCredits}",
+                    color = tc.muted,
+                    fontSize = 12.sp,
+                )
+                Text(
+                    "Limits: ${adCredits.config.dailyFreeRides} rides/day, ${adCredits.config.dailyFreeCalculator} calculator/day, ${adCredits.config.freeZoneLimit}+${adCredits.config.maxCreditZoneSlots} zones",
+                    color = tc.muted,
+                    fontSize = 12.sp,
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            activity?.let {
+                                adActions.openAdInspector(it) { error ->
+                                    if (error != null) {
+                                        Toast.makeText(context, error, Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            }
+                        },
+                        enabled = activity != null,
+                        modifier = Modifier.weight(1f),
+                        border = BorderStroke(1.dp, tc.accent),
+                        shape = RoundedCornerShape(10.dp),
+                    ) {
+                        Text("Ad Inspector", color = tc.accent, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                    OutlinedButton(
+                        onClick = adActions.refreshAdsConfig,
+                        modifier = Modifier.weight(1f),
+                        border = BorderStroke(1.dp, tc.accent),
+                        shape = RoundedCornerShape(10.dp),
+                    ) {
+                        Text("Refresh config", color = tc.accent, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                }
             }
         }
 
@@ -296,6 +350,7 @@ fun SettingsScreen(repo: SettingsRepository, vm: TrackingViewModel, onNavigate: 
             tariff           = editingTariff!!,
             currency         = draft.currency,
             distanceUnit     = draft.distanceUnit,
+            existingTariffs  = tariffs,
             initialExpenses  = tariffExpenses,
             onSave           = { t, expenses ->
                 vm.saveTariffWithExpenses(t, expenses)
@@ -314,6 +369,7 @@ fun TariffEditDialog(
     tariff: Tariff,
     currency: Currency,
     distanceUnit: DistanceUnit,
+    existingTariffs: List<Tariff> = emptyList(),
     initialExpenses: List<TariffExpense> = emptyList(),
     onSave: (Tariff, List<TariffExpense>) -> Unit,
     onDismiss: () -> Unit,
@@ -332,9 +388,10 @@ fun TariffEditDialog(
     var taxPercent     by remember { mutableStateOf(tariff.taxPercent) }
     var fuelCostPerKm  by remember { mutableStateOf(tariff.fuelCostPerKm) }
     var autoEnabled    by remember { mutableStateOf(tariff.autoEnabled) }
-    var autoStart      by remember { mutableStateOf(tariff.autoStartHour) }
-    var autoEnd        by remember { mutableStateOf(tariff.autoEndHour) }
+    var autoStart      by remember { mutableIntStateOf(tariff.autoStartMinuteOfDay()) }
+    var autoEnd        by remember { mutableIntStateOf(tariff.autoEndMinuteOfDay()) }
     var nameError      by remember { mutableStateOf(false) }
+    var autoError      by remember { mutableStateOf<String?>(null) }
 
     // Custom expenses state
     var expenses       by remember { mutableStateOf(initialExpenses.toMutableList()) }
@@ -463,14 +520,23 @@ fun TariffEditDialog(
                 }
 
                 if (autoEnabled) {
+                    autoError?.let {
+                        Text(it, color = tc.red, fontSize = 11.sp)
+                    }
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment     = Alignment.CenterVertically
                     ) {
-                        HourPicker(st.fromLabel, autoStart, Modifier.weight(1f)) { autoStart = it }
+                        TimePicker(st.fromLabel, autoStart, Modifier.weight(1f)) {
+                            autoStart = it
+                            autoError = null
+                        }
                         Text("→", color = tc.muted, fontSize = 16.sp)
-                        HourPicker(st.toLabel,   autoEnd,   Modifier.weight(1f)) { autoEnd   = it }
+                        TimePicker(st.toLabel,   autoEnd,   Modifier.weight(1f)) {
+                            autoEnd = it
+                            autoError = null
+                        }
                     }
                 }
             }
@@ -479,6 +545,12 @@ fun TariffEditDialog(
             Button(
                 onClick = {
                     if (name.isBlank()) { nameError = true; return@Button }
+                    if (autoEnabled) {
+                        validateAutoWindow(tariff.id, autoStart, autoEnd, existingTariffs)?.let {
+                            autoError = it
+                            return@Button
+                        }
+                    }
                     onSave(
                         tariff.copy(
                             name             = name.trim(),
@@ -490,8 +562,10 @@ fun TariffEditDialog(
                             taxPercent       = taxPercent,
                             fuelCostPerKm    = fuelCostPerKm,
                             autoEnabled      = autoEnabled,
-                            autoStartHour    = autoStart,
-                            autoEndHour      = autoEnd,
+                            autoStartHour    = autoStart / 60,
+                            autoEndHour      = autoEnd / 60,
+                            autoStartMinute  = autoStart % 60,
+                            autoEndMinute    = autoEnd % 60,
                         ),
                         expenses
                     )
@@ -900,36 +974,42 @@ fun SettingsNumField(
 }
 
 @Composable
-fun HourPicker(label: String, hour: Int, modifier: Modifier, onChange: (Int) -> Unit) {
+fun TimePicker(label: String, minuteOfDay: Int, modifier: Modifier, onChange: (Int) -> Unit) {
     val tc        = LocalThemeColors.current
-    var text      by remember { mutableStateOf("%02d:00".format(hour)) }
+    var text      by remember { mutableStateOf(formatAutoTime(minuteOfDay)) }
     var isFocused by remember { mutableStateOf(false) }
 
-    LaunchedEffect(hour) { if (!isFocused) text = "%02d:00".format(hour) }
+    LaunchedEffect(minuteOfDay) { if (!isFocused) text = formatAutoTime(minuteOfDay) }
 
     Column(modifier) {
         Text(label, color = tc.muted, fontSize = 10.sp)
         Spacer(Modifier.height(4.dp))
         OutlinedTextField(
             value         = text,
-            onValueChange = { text = it },
+            onValueChange = { raw ->
+                text = raw.filter { it.isDigit() || it == ':' }.take(5)
+            },
             modifier      = Modifier.fillMaxWidth().onFocusChanged { fs ->
                 if (isFocused && !fs.isFocused) {
-                    val h = text.replace(":00", "").trim().toIntOrNull()
-                    if (h != null && h in 0..23) onChange(h)
+                    parseTimeOfDay(text)?.let {
+                        onChange(it)
+                        text = formatAutoTime(it)
+                    }
                 }
                 isFocused = fs.isFocused
             },
             singleLine    = true,
-            placeholder   = { Text("HH:00", color = tc.muted, fontSize = 12.sp) },
+            placeholder   = { Text("HH:MM", color = tc.muted, fontSize = 12.sp) },
             keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                keyboardType = androidx.compose.ui.text.input.KeyboardType.Number,
+                keyboardType = androidx.compose.ui.text.input.KeyboardType.Text,
                 imeAction    = androidx.compose.ui.text.input.ImeAction.Done,
             ),
             keyboardActions = androidx.compose.foundation.text.KeyboardActions(
                 onDone = {
-                    val h = text.replace(":00", "").trim().toIntOrNull()
-                    if (h != null && h in 0..23) onChange(h)
+                    parseTimeOfDay(text)?.let {
+                        onChange(it)
+                        text = formatAutoTime(it)
+                    }
                 }
             ),
             colors = OutlinedTextFieldDefaults.colors(
@@ -942,3 +1022,60 @@ fun HourPicker(label: String, hour: Int, modifier: Modifier, onChange: (Int) -> 
         )
     }
 }
+
+private fun parseTimeOfDay(value: String): Int? {
+    val text = value.trim()
+    if (text.isEmpty()) return null
+
+    val parts = text.split(':')
+    val (hour, minute) = when {
+        parts.size == 2 -> {
+            val h = parts[0].toIntOrNull() ?: return null
+            val m = parts[1].toIntOrNull() ?: return null
+            h to m
+        }
+        parts.size == 1 && text.all { it.isDigit() } -> {
+            when (text.length) {
+                1, 2 -> (text.toIntOrNull() ?: return null) to 0
+                3 -> (text.take(1).toIntOrNull() ?: return null) to (text.takeLast(2).toIntOrNull() ?: return null)
+                4 -> (text.take(2).toIntOrNull() ?: return null) to (text.takeLast(2).toIntOrNull() ?: return null)
+                else -> return null
+            }
+        }
+        else -> return null
+    }
+
+    return if (hour in 0..23 && minute in 0..59) hour * 60 + minute else null
+}
+
+private fun validateAutoWindow(
+    currentTariffId: Int,
+    start: Int,
+    end: Int,
+    existingTariffs: List<Tariff>,
+): String? {
+    if (start == end) return "Началният и крайният час трябва да са различни."
+
+    val conflicting = existingTariffs
+        .filter { it.autoEnabled && it.id != currentTariffId }
+        .firstOrNull { other ->
+            val otherStart = other.autoStartMinuteOfDay()
+            val otherEnd = other.autoEndMinuteOfDay()
+            start == otherStart || start == otherEnd || end == otherStart || end == otherEnd ||
+                timeWindowsOverlapInclusive(start, end, otherStart, otherEnd)
+        }
+
+    return conflicting?.let {
+        "Автоактивирането се препокрива с \"${it.name}\" (${formatAutoTime(it.autoStartMinuteOfDay())} - ${formatAutoTime(it.autoEndMinuteOfDay())})."
+    }
+}
+
+private fun timeWindowsOverlapInclusive(startA: Int, endA: Int, startB: Int, endB: Int): Boolean {
+    val rangesA = splitTimeWindow(startA, endA)
+    val rangesB = splitTimeWindow(startB, endB)
+    return rangesA.any { a -> rangesB.any { b -> a.first <= b.last && b.first <= a.last } }
+}
+
+private fun splitTimeWindow(start: Int, end: Int): List<IntRange> =
+    if (start <= end) listOf(start..end)
+    else listOf(start until 24 * 60, 0..end)

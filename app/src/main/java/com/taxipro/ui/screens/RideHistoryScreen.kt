@@ -44,6 +44,8 @@ import com.taxipro.data.db.simplifyRideAddress
 import com.taxipro.ui.theme.LocalStrings
 import com.taxipro.ui.theme.LocalSettings
 import com.taxipro.ui.viewmodel.RideViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -76,13 +78,13 @@ fun RideHistoryScreen(vm: RideViewModel) {
     val allRidesOrNull by vm.allRides.collectAsState(initial = null)
     val allZones     by vm.allZones.collectAsState(initial = emptyList())
     val st           = LocalStrings.current
+    val filterText   = currentFilterUiText()
     val allRides     = allRidesOrNull ?: emptyList()
     val isLoading    = allRidesOrNull == null
 
     val nowMs        = remember { System.currentTimeMillis() }
-    val initWeek     = remember { pfCurrentWeekRange() }
-    var filterFromMs by remember { mutableStateOf<Long?>(initWeek.first) }
-    var filterToMs   by remember { mutableStateOf<Long?>(initWeek.second) }
+    var filterFromMs by remember { mutableStateOf<Long?>(pfStartOfDay(nowMs)) }
+    var filterToMs   by remember { mutableStateOf<Long?>(pfEndOfDay(nowMs)) }
     var sortBy       by remember { mutableStateOf(RideHistorySort.NEWEST) }
     var sortAsc      by remember { mutableStateOf(false) }
     var fromZoneName by remember { mutableStateOf<String?>(null) }
@@ -110,39 +112,47 @@ fun RideHistoryScreen(vm: RideViewModel) {
     val maxFare     = fareFilter.takeIf { !appliedFareFilterIsMin }
     val maxDuration = durationFilter.takeIf { !appliedDurationFilterIsMin }
 
-    val filteredRides = remember(
+    var displayed by remember { mutableStateOf<List<Ride>>(emptyList()) }
+    var isFiltering by remember { mutableStateOf(false) }
+    var visibleRideCount by remember { mutableIntStateOf(40) }
+
+    LaunchedEffect(
         allRides, allZones, filterFromMs, filterToMs, fromZoneName, toZoneName,
         minKm, minFare, minDuration, maxKm, maxFare, maxDuration, st.zones.outsideZones,
+        sortBy, sortAsc,
     ) {
-        allRides.filter { ride ->
-            val inPeriod = filterFromMs == null || filterToMs == null ||
-                ride.startTime in filterFromMs!!..filterToMs!!
-            val route = if (fromZoneName != null || toZoneName != null) {
-                rideHistoryZoneRoute(ride, allZones, st.zones.outsideZones)
-            } else null
-            val durationMin = ((ride.endTime - ride.startTime).coerceAtLeast(0L)) / 60_000.0
-            inPeriod &&
-                (fromZoneName == null || route?.from == fromZoneName) &&
-                (toZoneName == null || route?.to == toZoneName) &&
-                (minKm == null || ride.kilometers >= minKm) &&
-                (minFare == null || ride.price + ride.tip >= minFare) &&
-                (minDuration == null || durationMin >= minDuration) &&
-                (maxKm == null || ride.kilometers <= maxKm) &&
-                (maxFare == null || ride.price + ride.tip <= maxFare) &&
-                (maxDuration == null || durationMin <= maxDuration)
+        isFiltering = true
+        visibleRideCount = 40
+        displayed = withContext(Dispatchers.Default) {
+            val filtered = allRides.filter { ride ->
+                val inPeriod = filterFromMs == null || filterToMs == null ||
+                    ride.startTime in filterFromMs!!..filterToMs!!
+                val route = if (fromZoneName != null || toZoneName != null) {
+                    rideHistoryZoneRoute(ride, allZones, st.zones.outsideZones)
+                } else null
+                val durationMin = ((ride.endTime - ride.startTime).coerceAtLeast(0L)) / 60_000.0
+                inPeriod &&
+                    (fromZoneName == null || route?.from == fromZoneName) &&
+                    (toZoneName == null || route?.to == toZoneName) &&
+                    (minKm == null || ride.kilometers >= minKm) &&
+                    (minFare == null || ride.price + ride.tip >= minFare) &&
+                    (minDuration == null || durationMin >= minDuration) &&
+                    (maxKm == null || ride.kilometers <= maxKm) &&
+                    (maxFare == null || ride.price + ride.tip <= maxFare) &&
+                    (maxDuration == null || durationMin <= maxDuration)
+            }
+            val comparator = when (sortBy) {
+                RideHistorySort.NEWEST   -> compareBy<Ride> { it.startTime }
+                RideHistorySort.REVENUE  -> compareBy { it.price + it.tip }
+                RideHistorySort.DURATION -> compareBy { (it.endTime - it.startTime).coerceAtLeast(0L) }
+                RideHistorySort.KM       -> compareBy { it.kilometers }
+                RideHistorySort.WAIT     -> compareBy { it.waitMinutes }
+                RideHistorySort.TIP      -> compareBy { it.tip }
+            }
+            if (sortAsc) filtered.sortedWith(comparator)
+            else filtered.sortedWith(comparator.reversed())
         }
-    }
-    val displayed = remember(filteredRides, sortBy, sortAsc) {
-        val comparator = when (sortBy) {
-            RideHistorySort.NEWEST   -> compareBy<Ride> { it.startTime }
-            RideHistorySort.REVENUE  -> compareBy { it.price + it.tip }
-            RideHistorySort.DURATION -> compareBy { (it.endTime - it.startTime).coerceAtLeast(0L) }
-            RideHistorySort.KM       -> compareBy { it.kilometers }
-            RideHistorySort.WAIT     -> compareBy { it.waitMinutes }
-            RideHistorySort.TIP      -> compareBy { it.tip }
-        }
-        if (sortAsc) filteredRides.sortedWith(comparator)
-        else filteredRides.sortedWith(comparator.reversed())
+        isFiltering = false
     }
 
     Column(
@@ -157,7 +167,10 @@ fun RideHistoryScreen(vm: RideViewModel) {
         Spacer(Modifier.height(8.dp))
 
         // ── Period filter ────────────────────────────────────
-        PeriodFilterRow(onRangeChanged = { f, t -> filterFromMs = f; filterToMs = t })
+        PeriodFilterRow(
+            onRangeChanged = { f, t -> filterFromMs = f; filterToMs = t },
+            initialPeriod = ActivePeriod.TODAY,
+        )
 
         RideHistoryAdvancedFilters(
             zones = allZones,
@@ -240,25 +253,36 @@ fun RideHistoryScreen(vm: RideViewModel) {
         var pendingDelete by remember { mutableStateOf<(() -> Unit)?>(null) }
         var editRouteRide by remember { mutableStateOf<Ride?>(null) }
         var editTipFareRide by remember { mutableStateOf<Ride?>(null) }
+        var mapPreviewRide by remember { mutableStateOf<Ride?>(null) }
 
-        if (isLoading) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally,
-                       verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    CircularProgressIndicator(color = tc.accent)
+        if (isLoading || isFiltering) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = if (displayed.isEmpty()) 28.dp else 8.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    CircularProgressIndicator(color = tc.accent, modifier = Modifier.size(28.dp))
                     Text(st.loadingLabel, color = tc.muted, fontSize = 13.sp)
                 }
             }
-        } else if (displayed.isEmpty()) {
+        }
+
+        if (!isLoading && !isFiltering && displayed.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(st.history.noRides, color = tc.muted, fontSize = 14.sp)
             }
-        } else {
+        } else if (displayed.isNotEmpty()) {
+            val visibleRides = displayed.take(visibleRideCount)
             Column(
                 Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                displayed.forEach { ride ->
+                visibleRides.forEach { ride ->
                     key(ride.id) {
                         SwipeToDeleteBox(
                             onDeleteRequest = { pendingDelete = { vm.deleteRide(ride) } }
@@ -271,8 +295,23 @@ fun RideHistoryScreen(vm: RideViewModel) {
                                 onDelete      = { pendingDelete = { vm.deleteRide(ride) } },
                                 onEditRoute   = { editRouteRide = ride },
                                 onEditTipFare = { editTipFareRide = ride },
+                                onOpenMap     = { mapPreviewRide = ride },
                             )
                         }
+                    }
+                }
+                if (visibleRideCount < displayed.size) {
+                    OutlinedButton(
+                        onClick = { visibleRideCount += 40 },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, tc.accent),
+                    ) {
+                        Text(
+                            filterText.loadMore.format(displayed.size - visibleRideCount),
+                            color = tc.accent,
+                            fontWeight = FontWeight.Bold,
+                        )
                     }
                 }
                 Spacer(Modifier.height(80.dp))
@@ -305,6 +344,17 @@ fun RideHistoryScreen(vm: RideViewModel) {
                 onDismiss = { editTipFareRide = null },
             )
         }
+        mapPreviewRide?.let { ride ->
+            val points = remember(ride.id) { parseRoutePoints(ride.routePointsJson) }
+            if (points.size >= 2) {
+                RouteMapDialog(
+                    points = points,
+                    startTitle = st.history.startMarker,
+                    endTitle = st.history.endMarker,
+                    onDismiss = { mapPreviewRide = null },
+                )
+            }
+        }
     }
 
 }
@@ -317,6 +367,7 @@ private fun RideHistorySortRow(
     onToggleDirection: () -> Unit,
 ) {
     val tc = LocalThemeColors.current
+    val filterText = currentFilterUiText()
     var expanded by remember { mutableStateOf(false) }
     val labels = mapOf(
         RideHistorySort.NEWEST to "Дата",
@@ -388,8 +439,9 @@ private fun RideHistoryAdvancedFilters(
 ) {
     val tc = LocalThemeColors.current
     val settings = LocalSettings.current
-    val options = remember(zones, outsideLabel) {
-        listOf<Pair<String?, String>>(null to "Всички") +
+    val filterText = currentFilterUiText()
+    val options = remember(zones, outsideLabel, filterText.all) {
+        listOf<Pair<String?, String>>(null to filterText.all) +
             zones.map { it.name to it.name } +
             (outsideLabel.takeIf { it.isNotBlank() }?.let { listOf(it to it) } ?: emptyList())
     }
@@ -407,28 +459,30 @@ private fun RideHistoryAdvancedFilters(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Разширени филтри", color = tc.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Text(filterText.advancedFilters, color = tc.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                 if (hasFilters) {
                     TextButton(onClick = onClear, contentPadding = PaddingValues(horizontal = 8.dp)) {
                         Icon(Icons.Default.Clear, null, modifier = Modifier.size(14.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("Изчисти", fontSize = 11.sp)
+                        Text(filterText.clear, fontSize = 11.sp)
                     }
                 }
             }
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 RideHistoryZoneDropdown(
-                    label = "От зона",
+                    label = filterText.fromZone,
                     selected = fromZoneName,
                     options = options,
+                    allLabel = filterText.all,
                     modifier = Modifier.weight(1f),
                     onSelected = onFromSelected,
                 )
                 RideHistoryZoneDropdown(
-                    label = "До зона",
+                    label = filterText.toZone,
                     selected = toZoneName,
                     options = options,
+                    allLabel = filterText.all,
                     modifier = Modifier.weight(1f),
                     onSelected = onToSelected,
                 )
@@ -436,7 +490,7 @@ private fun RideHistoryAdvancedFilters(
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 RideHistoryNumberFilter(
-                    label = "Км",
+                    label = filterText.km,
                     value = kmText,
                     suffix = settings.distanceUnit.shortLabel,
                     isMin = kmIsMin,
@@ -446,7 +500,7 @@ private fun RideHistoryAdvancedFilters(
                     onApply = onApplyKm,
                 )
                 RideHistoryNumberFilter(
-                    label = "Сума",
+                    label = filterText.amount,
                     value = fareText,
                     suffix = settings.currency.symbol,
                     isMin = fareIsMin,
@@ -456,9 +510,9 @@ private fun RideHistoryAdvancedFilters(
                     onApply = onApplyFare,
                 )
                 RideHistoryNumberFilter(
-                    label = "Време",
+                    label = filterText.time,
                     value = durationText,
-                    suffix = "мин",
+                    suffix = filterText.minutesShort,
                     isMin = durationIsMin,
                     modifier = Modifier.weight(1f),
                     onToggleMode = onToggleDurationMode,
@@ -475,6 +529,7 @@ private fun RideHistoryZoneDropdown(
     label: String,
     selected: String?,
     options: List<Pair<String?, String>>,
+    allLabel: String,
     modifier: Modifier = Modifier,
     onSelected: (String?) -> Unit,
 ) {
@@ -490,7 +545,7 @@ private fun RideHistoryZoneDropdown(
         ) {
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
                 Text(label, color = tc.muted, fontSize = 9.sp)
-                Text(selected ?: "Всички", color = tc.textPrimary, fontSize = 12.sp, maxLines = 1)
+                Text(selected ?: allLabel, color = tc.textPrimary, fontSize = 12.sp, maxLines = 1)
             }
             Icon(Icons.Default.ArrowDropDown, null, tint = tc.accent)
         }
@@ -526,6 +581,7 @@ private fun RideHistoryNumberFilter(
     onApply: () -> Unit,
 ) {
     val tc = LocalThemeColors.current
+    val filterText = currentFilterUiText()
     OutlinedTextField(
         value = value,
         onValueChange = { raw ->
@@ -547,7 +603,7 @@ private fun RideHistoryNumberFilter(
                 contentPadding = PaddingValues(horizontal = 4.dp),
                 modifier = Modifier.width(44.dp),
             ) {
-                Text(if (isMin) "Мин" else "Макс", color = tc.accent, fontSize = 10.sp)
+                Text(if (isMin) filterText.min else filterText.max, color = tc.accent, fontSize = 10.sp)
             }
         },
         suffix = { Text(suffix, color = tc.muted, fontSize = 10.sp) },
@@ -577,6 +633,7 @@ private fun HistoryRideCard(
     onDelete: () -> Unit,
     onEditRoute: () -> Unit,
     onEditTipFare: () -> Unit,
+    onOpenMap: () -> Unit,
 ) {
     val tc       = LocalThemeColors.current
     val st       = LocalStrings.current
@@ -603,7 +660,8 @@ private fun HistoryRideCard(
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors   = CardDefaults.cardColors(containerColor = tc.card),
-        shape    = RoundedCornerShape(12.dp)
+        shape    = RoundedCornerShape(12.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
     ) {
         Column {
             // ── Header row (always visible, tappable) ─────────
@@ -752,12 +810,10 @@ private fun HistoryRideCard(
                         }
                     }
                     if (routePoints.size >= 2) {
-                        PremiumGate(
-                            modifier    = Modifier.fillMaxWidth(),
-                            featureHint = st.premium.gateHintMap,
-                        ) {
-                            RouteMapSection(routePoints, st.history.startMarker, st.history.endMarker)
-                        }
+                        RoutePreviewPlaceholder(
+                            pointCount = routePoints.size,
+                            onOpenMap = onOpenMap,
+                        )
                     } else {
                         Box(
                             Modifier
@@ -828,6 +884,34 @@ private fun RideHistoryDetailChip(
 
 // ── Inline map for a single ride route ──────────────────────
 @Composable
+private fun RoutePreviewPlaceholder(
+    pointCount: Int,
+    onOpenMap: () -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .background(tc.cardAlt, RoundedCornerShape(12.dp))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text("Route points: $pointCount", color = tc.textPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Text("Map preview opens on demand to keep scrolling smooth.", color = tc.muted, fontSize = 11.sp)
+        OutlinedButton(
+            onClick = onOpenMap,
+            shape = RoundedCornerShape(10.dp),
+            border = BorderStroke(1.dp, tc.accent.copy(alpha = 0.35f)),
+        ) {
+            Icon(Icons.Default.Map, null, tint = tc.accent, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("Open map", color = tc.accent, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+@Composable
 private fun RouteMapSection(points: List<LatLng>, startTitle: String, endTitle: String) {
     val tc            = LocalThemeColors.current
     val boundsBuilder = remember(points) {
@@ -878,6 +962,45 @@ private fun RouteMapSection(points: List<LatLng>, startTitle: String, endTitle: 
 }
 
 // ── Swipe-to-delete container ────────────────────────────────
+@Composable
+private fun RouteMapDialog(
+    points: List<LatLng>,
+    startTitle: String,
+    endTitle: String,
+    onDismiss: () -> Unit,
+) {
+    val tc = LocalThemeColors.current
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnClickOutside = true,
+        ),
+    ) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(tc.background)
+        ) {
+            Column(Modifier.fillMaxSize()) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(tc.card)
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, null, tint = tc.accent)
+                    }
+                    Text("Route map", color = tc.textPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                }
+                RouteMapSection(points = points, startTitle = startTitle, endTitle = endTitle)
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SwipeToDeleteBox(

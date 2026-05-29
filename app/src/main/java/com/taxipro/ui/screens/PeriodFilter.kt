@@ -103,20 +103,32 @@ enum class ActivePeriod { ALL_TIME, TODAY, WEEK, MONTH, YEAR, CUSTOM }
 fun PeriodFilterRow(
     onRangeChanged: (from: Long?, to: Long?) -> Unit,
     onPeriodChanged: ((ActivePeriod) -> Unit)? = null,
+    initialPeriod: ActivePeriod = ActivePeriod.WEEK,
     modifier: Modifier = Modifier,
 ) {
     val tc     = LocalThemeColors.current
     val st     = LocalStrings.current
     val nowCal = remember { Calendar.getInstance() }
 
-    var activePeriod  by remember { mutableStateOf(ActivePeriod.WEEK) }
+    var activePeriod  by remember { mutableStateOf(initialPeriod) }
     var showPickerFor by remember { mutableStateOf<ActivePeriod?>(null) }
     var showCustom    by remember { mutableStateOf(false) }
 
-    // Fire the initial WEEK range so the parent filter is in sync with the chip on first render.
-    LaunchedEffect(Unit) {
-        val (s, e) = pfCurrentWeekRange()
-        onRangeChanged(s, e)
+    // Fire the initial range so the parent filter is in sync with the selected chip on first render.
+    LaunchedEffect(initialPeriod) {
+        val range = when (initialPeriod) {
+            ActivePeriod.ALL_TIME -> null
+            ActivePeriod.TODAY -> {
+                val day = pfStartOfDay(System.currentTimeMillis())
+                day to pfEndOfDay(day)
+            }
+            ActivePeriod.WEEK -> pfCurrentWeekRange()
+            ActivePeriod.MONTH -> pfRangeForMonth(nowCal.get(Calendar.YEAR), nowCal.get(Calendar.MONTH))
+            ActivePeriod.YEAR -> pfRangeForYear(nowCal.get(Calendar.YEAR))
+            ActivePeriod.CUSTOM -> null
+        }
+        if (range == null) onRangeChanged(null, null) else onRangeChanged(range.first, range.second)
+        onPeriodChanged?.invoke(initialPeriod)
     }
 
     // Picker selection — defaults to current date context
