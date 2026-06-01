@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TaxiPro Data Deletion</title>
+  <meta name="description" content="Instructions for requesting deletion of TaxiPro app data.">
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f3ee;
+      --panel: #ffffff;
+      --text: #1f2328;
+      --muted: #5b6470;
+      --accent: #0f62fe;
+      --border: #dde3ea;
+      --soft: #eef3f8;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        linear-gradient(180deg, rgba(15, 98, 254, 0.06), transparent 220px),
+        var(--bg);
+      color: var(--text);
+      font-family: Arial, sans-serif;
+      line-height: 1.6;
+    }
+
+    main {
+      width: min(92vw, 860px);
+      margin: 0 auto;
+      padding: 48px 20px 64px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      box-shadow: 0 18px 60px rgba(31, 35, 40, 0.08);
+      padding: 36px;
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(32px, 4vw, 48px);
+      line-height: 1.08;
+    }
+
+    h2 {
+      margin: 28px 0 10px;
+      font-size: 20px;
+      line-height: 1.25;
+    }
+
+    p, li {
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    ul, ol {
+      margin: 10px 0 0 22px;
+      padding: 0;
+    }
+
+    li { margin: 6px 0; }
+
+    .callout {
+      margin-top: 20px;
+      padding: 16px 18px;
+      border-radius: 14px;
+      background: var(--soft);
+      color: var(--text);
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    a:hover { text-decoration: underline; }
+
+    .footer {
+      margin-top: 28px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="card">
+      <p class="eyebrow">TaxiPro</p>
+      <h1>Data Deletion Request</h1>
+      <p>
+        TaxiPro lets users delete the app data stored locally on their device.
+        This page explains what can be deleted and how to request it.
+      </p>
+
+      <h2>What can be deleted</h2>
+      <ul>
+        <li>Trip history</li>
+        <li>Shift history</li>
+        <li>Route statistics</li>
+        <li>Zone data created in the app</li>
+        <li>Local settings and preferences</li>
+      </ul>
+
+      <h2>How to delete your data</h2>
+      <ol>
+        <li>Open TaxiPro.</li>
+        <li>Go to <strong>Settings</strong>.</li>
+        <li>Choose <strong>Reset / Clear data</strong>.</li>
+        <li>Confirm the deletion.</li>
+      </ol>
+
+      <div class="callout">
+        If you need help, contact:
+        <a href="mailto:statslab.dev@gmail.com">statslab.dev@gmail.com</a>
+      </div>
+
+      <h2>What may be retained</h2>
+      <p>
+        Some data may remain only if it is required for legal, tax, accounting,
+        or fraud-prevention purposes, or if it is handled by Google Play for a
+        purchase or subscription.
+      </p>
+
+      <p class="footer">
+        Privacy Policy: <a href="./privacy-policy.html">privacy-policy.html</a><br>
+        Developer: TaxiPro
+      </p>
+    </section>
+  </main>
+</body>
+</html>
